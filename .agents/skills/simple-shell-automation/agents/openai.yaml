@@ -1,0 +1,13 @@
+interface:
+  display_name: "簡單 Shell 自動化"
+  short_description: "撰寫簡單、可重複執行且容易維護的 Shell 自動化腳本。"
+  default_prompt: "請使用 $simple-shell-automation 撰寫簡單、可重複執行且不使用進階技巧的 Shell 自動化腳本。"
+  icon_small: "./assets/icon.svg"
+  icon_large: "./assets/icon.svg"
+policy:
+  products:
+  - "chatgpt"
+  - "codex"
+  - "api"
+  - "atlas"
+  allow_implicit_invocation: true
