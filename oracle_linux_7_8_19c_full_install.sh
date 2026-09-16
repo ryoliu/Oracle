@@ -157,6 +157,7 @@ if [ -e "$ORAINST_FILE" ] || [ -e "$ORAINST_ROOT_MARKER" ]; then
        ! grep -Fxq "inst_group=$INVENTORY_GROUP" "$ORAINST_ROOT_MARKER"; then
         echo "ERROR: Existing Inventory root configuration has no matching completion record."
         echo "DBA review of orainstRoot.sh completion is required before system changes."
+        echo "Recovery guide: INVENTORY_MARKER_RECOVERY.md in the same directory as this script."
         exit 1
     fi
 fi
@@ -981,6 +982,7 @@ else
     fi
     if ! printf 'inventory_loc=%s\ninst_group=%s\n' "$ORA_INVENTORY" "$INVENTORY_GROUP" > "$ORAINST_ROOT_MARKER"; then
         echo "ERROR: Failed to record Inventory root configuration completion."
+        echo "Recovery guide: INVENTORY_MARKER_RECOVERY.md in the same directory as this script."
         exit 1
     fi
 fi
