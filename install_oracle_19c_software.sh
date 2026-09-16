@@ -76,7 +76,7 @@ if [ "$INSTALL_REQUIRED" = "Y" ]; then
     su - "$ORACLE_USER" -c "
         cd \"$ORACLE_HOME\" &&
 
-        ./runInstaller \
+        CV_ASSUME_DISTID=OL7 ./runInstaller \
             -silent \
             -waitforcompletion \
             -showProgress \
