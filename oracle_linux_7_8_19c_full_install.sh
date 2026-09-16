@@ -4,6 +4,8 @@
 # Run this script as root.
 # The Oracle 19c ZIP can be copied by root before ORACLE_OWNER exists.
 # OS preparation and root scripts run as root; extraction and installation run as ORACLE_OWNER.
+# OL8 installation assumes acceptance of CV_ASSUME_DISTID=OL7 for the 19.3 media.
+# This script does not apply an RU or verify OS/kernel/Oracle certification.
 
 PACKAGE_NAME="oracle-database-preinstall-19c"
 PREINSTALL_SYSCTL="/etc/sysctl.d/99-oracle-database-preinstall-19c-sysctl.conf"
@@ -75,6 +77,7 @@ case "$ID:${VERSION_ID%%.*}" in
     ol:8)
         INSTALLER_DISTID="OL7"
         echo "Oracle Linux 8 detected. Using CV_ASSUME_DISTID=OL7 for the 19.3 installer."
+        echo "Installation prerequisite: accept this override; no RU or certification check is included."
         ;;
     *)
         echo "ERROR: This script supports Oracle Linux 7 and 8 only: $ID $VERSION_ID"
@@ -102,6 +105,75 @@ hostname
 hostname -f 2>/dev/null || echo "WARNING: Unable to resolve FQDN."
 
 echo ""
+# Check existing Inventory without changing ownership or permissions.
+INVENTORY_GROUP="$ORACLE_GROUP"
+if [ -f "$ORAINST_FILE" ]; then
+    EXISTING_ORA_INVENTORY="$(sed -n 's/^inventory_loc=//p' "$ORAINST_FILE")"
+    INVENTORY_GROUP="$(sed -n 's/^inst_group=//p' "$ORAINST_FILE")"
+    if [ -z "$EXISTING_ORA_INVENTORY" ] || [ -z "$INVENTORY_GROUP" ]; then
+        echo "ERROR: oraInst.loc is missing inventory_loc or inst_group."
+        exit 1
+    fi
+    ORA_INVENTORY="$EXISTING_ORA_INVENTORY"
+    if [ ! -d "$ORA_INVENTORY" ]; then
+        echo "ERROR: oraInst.loc points to a missing Inventory: $ORA_INVENTORY"
+        exit 1
+    fi
+fi
+
+INVENTORY_FILE="$ORA_INVENTORY/ContentsXML/inventory.xml"
+INSTALL_REQUIRED="Y"
+
+# Inventory registration alone does not prove that runInstaller succeeded.
+# This marker records installer success only; root scripts are checked separately.
+if [ -f "$INSTALL_MARKER" ]; then
+    if ! IFS= read -r INSTALL_BATCH_ID < "$INSTALL_MARKER" ||
+       [ -z "$INSTALL_BATCH_ID" ]; then
+        echo "ERROR: Installer completion marker has no installation batch ID."
+        echo "Legacy markers require DBA review of installer and root-script completion."
+        exit 1
+    fi
+    if [ ! -f "$INVENTORY_FILE" ] ||
+       ! grep -Fq "LOC=\"$ORACLE_HOME\"" "$INVENTORY_FILE"; then
+        echo "ERROR: Installer completion marker exists, but Inventory registration is missing."
+        echo "Review Oracle Home and Inventory before rerunning this script."
+        exit 1
+    fi
+    INSTALL_REQUIRED="N"
+elif [ -f "$INVENTORY_FILE" ] &&
+     grep -Fq "LOC=\"$ORACLE_HOME\"" "$INVENTORY_FILE"; then
+    echo "ERROR: Oracle Home is registered, but installer success has not been recorded."
+    echo "Review the previous installer logs and resolve the installation state before rerunning."
+    echo "Inventory registration alone is not treated as installation success."
+    exit 1
+fi
+
+ORAINST_ROOT_MARKER="$ORA_INVENTORY/.orainst_root_complete"
+if [ -e "$ORAINST_FILE" ] || [ -e "$ORAINST_ROOT_MARKER" ]; then
+    if [ ! -f "$ORAINST_FILE" ] || [ ! -f "$ORAINST_ROOT_MARKER" ] ||
+       ! grep -Fxq "inventory_loc=$ORA_INVENTORY" "$ORAINST_FILE" ||
+       ! grep -Fxq "inst_group=$INVENTORY_GROUP" "$ORAINST_FILE" ||
+       ! grep -Fxq "inventory_loc=$ORA_INVENTORY" "$ORAINST_ROOT_MARKER" ||
+       ! grep -Fxq "inst_group=$INVENTORY_GROUP" "$ORAINST_ROOT_MARKER"; then
+        echo "ERROR: Existing Inventory root configuration has no matching completion record."
+        echo "DBA review of orainstRoot.sh completion is required before system changes."
+        exit 1
+    fi
+fi
+
+if [ "$INSTALL_REQUIRED" = "Y" ] && [ ! -f "$EXTRACT_MARKER" ] &&
+   [ -d "$ORACLE_HOME" ]; then
+    if ! FIRST_HOME_ENTRY="$(find "$ORACLE_HOME" -mindepth 1 -maxdepth 1 -print -quit)"; then
+        echo "ERROR: Failed to inspect Oracle Home: $ORACLE_HOME"
+        exit 1
+    fi
+    if [ -n "$FIRST_HOME_ENTRY" ]; then
+        echo "ERROR: Oracle Home is not empty and has no completion marker: $ORACLE_HOME"
+        echo "DBA review is required before system changes."
+        exit 1
+    fi
+fi
+
 echo "=== 2. Check yum and install 19c preinstall package ==="
 
 if rpm -q "$PACKAGE_NAME" >/dev/null 2>&1; then
@@ -313,22 +385,6 @@ if [ "$ORACLE_USER_EXISTED_BEFORE_PREINSTALL" -eq 0 ] ||
     echo "Oracle user password was configured successfully."
 else
     echo "Oracle user existed before the preinstall package. Password was preserved."
-fi
-
-# Check existing Inventory without changing ownership or permissions.
-INVENTORY_GROUP="$ORACLE_GROUP"
-if [ -f "$ORAINST_FILE" ]; then
-    EXISTING_ORA_INVENTORY="$(sed -n 's/^inventory_loc=//p' "$ORAINST_FILE")"
-    INVENTORY_GROUP="$(sed -n 's/^inst_group=//p' "$ORAINST_FILE")"
-    if [ -z "$EXISTING_ORA_INVENTORY" ] || [ -z "$INVENTORY_GROUP" ]; then
-        echo "ERROR: oraInst.loc is missing inventory_loc or inst_group."
-        exit 1
-    fi
-    ORA_INVENTORY="$EXISTING_ORA_INVENTORY"
-    if [ ! -d "$ORA_INVENTORY" ]; then
-        echo "ERROR: oraInst.loc points to a missing Inventory: $ORA_INVENTORY"
-        exit 1
-    fi
 fi
 
 if [ -d "$ORA_INVENTORY" ]; then
@@ -637,7 +693,20 @@ if [ "$(id -un)" != "oracle" ]; then
     exit 1
 fi
 
-if ! cat > "$ALIAS_FILE" <<'EOF'
+for TARGET_FILE in "$ALIAS_FILE" "$PROFILE_FILE"; do
+    if [ -L "$TARGET_FILE" ] || { [ -e "$TARGET_FILE" ] && [ ! -f "$TARGET_FILE" ]; }; then
+        echo "ERROR: Review symbolic link or non-regular profile path: $TARGET_FILE"
+        exit 1
+    fi
+done
+
+if ! PROFILE_STAGE_DIR="$(mktemp -d)"; then
+    echo "ERROR: Failed to create temporary profile directory."
+    exit 1
+fi
+trap 'rm -rf -- "$PROFILE_STAGE_DIR"' EXIT
+
+if ! cat > "$PROFILE_STAGE_DIR/.bash_alias" <<'EOF'
 alias ORADATA="ls -lur /oradata/*_*/*/data/*.dbf"
 alias ORAPS="ps -ef | grep -iv 'grep' | egrep -i -n 'smon|lsnr'; df -h | grep -i /ora"
 alias dba="sqlplus / as sysdba"
@@ -647,22 +716,10 @@ then
     exit 1
 fi
 
-echo "Oracle DBA aliases configured: $ALIAS_FILE"
-
 echo "Current user: $(id -un)"
 echo "Profile file: $PROFILE_FILE"
 
-if [ -L "$PROFILE_FILE" ]; then
-    echo "ERROR: Profile file is a symbolic link. Review it before continuing: $PROFILE_FILE"
-    exit 1
-fi
-
-if [ -e "$PROFILE_FILE" ] && [ ! -f "$PROFILE_FILE" ]; then
-    echo "ERROR: Profile path is not a regular file: $PROFILE_FILE"
-    exit 1
-fi
-
-if ! cat > "$PROFILE_FILE" <<EOF
+if ! cat > "$PROFILE_STAGE_DIR/.bash_profile" <<EOF
 if [ -f "\$HOME/.bashrc" ]; then
     . "\$HOME/.bashrc"
 fi
@@ -690,6 +747,35 @@ then
     exit 1
 fi
 
+PROFILE_REVIEW_REQUIRED="N"
+for TARGET_FILE in "$ALIAS_FILE" "$PROFILE_FILE"; do
+    if [ -f "$TARGET_FILE" ] &&
+       ! cmp -s "$TARGET_FILE" "$PROFILE_STAGE_DIR/${TARGET_FILE##*/}"; then
+        if [ ! -e "$TARGET_FILE.before_oracle_19c" ] && [ ! -L "$TARGET_FILE.before_oracle_19c" ]; then
+            if ! cp -p "$TARGET_FILE" "$TARGET_FILE.before_oracle_19c"; then
+                echo "ERROR: Failed to back up: $TARGET_FILE"
+                exit 1
+            fi
+        fi
+        echo "ERROR: Existing content differs. Review manually: $TARGET_FILE"
+        echo "First backup is preserved at: $TARGET_FILE.before_oracle_19c"
+        PROFILE_REVIEW_REQUIRED="Y"
+    fi
+done
+if [ "$PROFILE_REVIEW_REQUIRED" = "Y" ]; then
+    echo "Profile and alias files were not replaced. Reconcile existing settings before rerunning."
+    exit 1
+fi
+
+for TARGET_FILE in "$ALIAS_FILE" "$PROFILE_FILE"; do
+    if [ -f "$TARGET_FILE" ]; then
+        echo "Profile content already matches. Skipping: $TARGET_FILE"
+    elif ! cp "$PROFILE_STAGE_DIR/${TARGET_FILE##*/}" "$TARGET_FILE"; then
+        echo "ERROR: Failed to create: $TARGET_FILE"
+        exit 1
+    fi
+done
+
 echo "Oracle 19c environment configured successfully."
 
 ORACLE_PROFILE_SCRIPT
@@ -703,33 +789,6 @@ echo "Oracle .bash_profile configuration completed."
 
 echo ""
 echo "=== 20. Extract Oracle 19c Database Home ==="
-
-INVENTORY_FILE="$ORA_INVENTORY/ContentsXML/inventory.xml"
-INSTALL_REQUIRED="Y"
-
-# Inventory registration alone does not prove that runInstaller succeeded.
-# This marker records installer success only; root scripts are checked separately.
-if [ -f "$INSTALL_MARKER" ]; then
-    if ! IFS= read -r INSTALL_BATCH_ID < "$INSTALL_MARKER" ||
-       [ -z "$INSTALL_BATCH_ID" ]; then
-        echo "ERROR: Installer completion marker has no installation batch ID."
-        echo "Legacy markers require DBA review of installer and root-script completion."
-        exit 1
-    fi
-    if [ ! -f "$INVENTORY_FILE" ] ||
-       ! grep -Fq "LOC=\"$ORACLE_HOME\"" "$INVENTORY_FILE"; then
-        echo "ERROR: Installer completion marker exists, but Inventory registration is missing."
-        echo "Review Oracle Home and Inventory before rerunning this script."
-        exit 1
-    fi
-    INSTALL_REQUIRED="N"
-elif [ -f "$INVENTORY_FILE" ] &&
-     grep -Fq "LOC=\"$ORACLE_HOME\"" "$INVENTORY_FILE"; then
-    echo "ERROR: Oracle Home is registered, but installer success has not been recorded."
-    echo "Review the previous installer logs and resolve the installation state before rerunning."
-    echo "Inventory registration alone is not treated as installation success."
-    exit 1
-fi
 
 # The marker records successful extraction only, not installation or file integrity.
 if [ "$INSTALL_REQUIRED" = "N" ]; then
@@ -896,8 +955,11 @@ fi
 echo ""
 echo "=== 22. Run orainstRoot.sh ==="
 
-if [ -f "$ORAINST_FILE" ] &&
-   grep -Fxq "inventory_loc=$ORA_INVENTORY" "$ORAINST_FILE"; then
+if [ -f "$ORAINST_FILE" ] && [ -f "$ORAINST_ROOT_MARKER" ] &&
+   grep -Fxq "inventory_loc=$ORA_INVENTORY" "$ORAINST_FILE" &&
+   grep -Fxq "inst_group=$INVENTORY_GROUP" "$ORAINST_FILE" &&
+   grep -Fxq "inventory_loc=$ORA_INVENTORY" "$ORAINST_ROOT_MARKER" &&
+   grep -Fxq "inst_group=$INVENTORY_GROUP" "$ORAINST_ROOT_MARKER"; then
     echo "Oracle Inventory root configuration is already completed."
     echo "Skip orainstRoot.sh."
 else
@@ -908,6 +970,17 @@ else
 
     if ! "$ORA_INVENTORY/orainstRoot.sh"; then
         echo "ERROR: orainstRoot.sh failed."
+        exit 1
+    fi
+
+    if [ ! -f "$ORAINST_FILE" ] ||
+       ! grep -Fxq "inventory_loc=$ORA_INVENTORY" "$ORAINST_FILE" ||
+       ! grep -Fxq "inst_group=$INVENTORY_GROUP" "$ORAINST_FILE"; then
+        echo "ERROR: Inventory root configuration verification failed."
+        exit 1
+    fi
+    if ! printf 'inventory_loc=%s\ninst_group=%s\n' "$ORA_INVENTORY" "$INVENTORY_GROUP" > "$ORAINST_ROOT_MARKER"; then
+        echo "ERROR: Failed to record Inventory root configuration completion."
         exit 1
     fi
 fi
