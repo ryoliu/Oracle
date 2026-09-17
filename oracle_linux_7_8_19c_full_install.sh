@@ -701,13 +701,8 @@ for TARGET_FILE in "$ALIAS_FILE" "$PROFILE_FILE"; do
     fi
 done
 
-if ! PROFILE_STAGE_DIR="$(mktemp -d)"; then
-    echo "ERROR: Failed to create temporary profile directory."
-    exit 1
-fi
-trap 'rm -rf -- "$PROFILE_STAGE_DIR"' EXIT
-
-if ! cat > "$PROFILE_STAGE_DIR/.bash_alias" <<'EOF'
+# This script manages both files and replaces their contents on each run.
+if ! cat > "$ALIAS_FILE" <<'EOF'
 alias ORADATA="ls -lur /oradata/*_*/*/data/*.dbf"
 alias ORAPS="ps -ef | grep -iv 'grep' | egrep -i -n 'smon|lsnr'; df -h | grep -i /ora"
 alias dba="sqlplus / as sysdba"
@@ -717,10 +712,11 @@ then
     exit 1
 fi
 
+echo "Oracle DBA aliases configured: $ALIAS_FILE"
 echo "Current user: $(id -un)"
 echo "Profile file: $PROFILE_FILE"
 
-if ! cat > "$PROFILE_STAGE_DIR/.bash_profile" <<EOF
+if ! cat > "$PROFILE_FILE" <<EOF
 if [ -f "\$HOME/.bashrc" ]; then
     . "\$HOME/.bashrc"
 fi
@@ -747,35 +743,6 @@ then
     echo "ERROR: Failed to write $PROFILE_FILE"
     exit 1
 fi
-
-PROFILE_REVIEW_REQUIRED="N"
-for TARGET_FILE in "$ALIAS_FILE" "$PROFILE_FILE"; do
-    if [ -f "$TARGET_FILE" ] &&
-       ! cmp -s "$TARGET_FILE" "$PROFILE_STAGE_DIR/${TARGET_FILE##*/}"; then
-        if [ ! -e "$TARGET_FILE.before_oracle_19c" ] && [ ! -L "$TARGET_FILE.before_oracle_19c" ]; then
-            if ! cp -p "$TARGET_FILE" "$TARGET_FILE.before_oracle_19c"; then
-                echo "ERROR: Failed to back up: $TARGET_FILE"
-                exit 1
-            fi
-        fi
-        echo "ERROR: Existing content differs. Review manually: $TARGET_FILE"
-        echo "First backup is preserved at: $TARGET_FILE.before_oracle_19c"
-        PROFILE_REVIEW_REQUIRED="Y"
-    fi
-done
-if [ "$PROFILE_REVIEW_REQUIRED" = "Y" ]; then
-    echo "Profile and alias files were not replaced. Reconcile existing settings before rerunning."
-    exit 1
-fi
-
-for TARGET_FILE in "$ALIAS_FILE" "$PROFILE_FILE"; do
-    if [ -f "$TARGET_FILE" ]; then
-        echo "Profile content already matches. Skipping: $TARGET_FILE"
-    elif ! cp "$PROFILE_STAGE_DIR/${TARGET_FILE##*/}" "$TARGET_FILE"; then
-        echo "ERROR: Failed to create: $TARGET_FILE"
-        exit 1
-    fi
-done
 
 echo "Oracle 19c environment configured successfully."
 
