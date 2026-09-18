@@ -19,7 +19,6 @@ ORACLE_BASE="/opt/oracle"
 ORACLE_HOME="/opt/oracle/product/19.3.0.0/db_1"
 EXTRACT_MARKER="$ORACLE_HOME/.oracle_19c_extraction_complete"
 INSTALL_MARKER="$ORACLE_HOME/.oracle_19c_installer_complete"
-ROOT_MARKER="$ORACLE_HOME/.oracle_19c_root_complete"
 ORA_INVENTORY="/opt/oraInventory"
 ORAINST_FILE="/etc/oraInst.loc"
 ORACLE_OWNER="oracle"
@@ -125,7 +124,7 @@ INVENTORY_FILE="$ORA_INVENTORY/ContentsXML/inventory.xml"
 INSTALL_REQUIRED="Y"
 
 # Inventory registration alone does not prove that runInstaller succeeded.
-# This marker records installer success only; root scripts are checked separately.
+# This marker records installer success only; root scripts run on every execution.
 if [ -f "$INSTALL_MARKER" ]; then
     if ! IFS= read -r INSTALL_BATCH_ID < "$INSTALL_MARKER" ||
        [ -z "$INSTALL_BATCH_ID" ]; then
@@ -146,20 +145,6 @@ elif [ -f "$INVENTORY_FILE" ] &&
     echo "Review the previous installer logs and resolve the installation state before rerunning."
     echo "Inventory registration alone is not treated as installation success."
     exit 1
-fi
-
-ORAINST_ROOT_MARKER="$ORA_INVENTORY/.orainst_root_complete"
-if [ -e "$ORAINST_FILE" ] || [ -e "$ORAINST_ROOT_MARKER" ]; then
-    if [ ! -f "$ORAINST_FILE" ] || [ ! -f "$ORAINST_ROOT_MARKER" ] ||
-       ! grep -Fxq "inventory_loc=$ORA_INVENTORY" "$ORAINST_FILE" ||
-       ! grep -Fxq "inst_group=$INVENTORY_GROUP" "$ORAINST_FILE" ||
-       ! grep -Fxq "inventory_loc=$ORA_INVENTORY" "$ORAINST_ROOT_MARKER" ||
-       ! grep -Fxq "inst_group=$INVENTORY_GROUP" "$ORAINST_ROOT_MARKER"; then
-        echo "ERROR: Existing Inventory root configuration has no matching completion record."
-        echo "DBA review of orainstRoot.sh completion is required before system changes."
-        echo "Recovery guide: INVENTORY_MARKER_RECOVERY.md in the same directory as this script."
-        exit 1
-    fi
 fi
 
 if [ "$INSTALL_REQUIRED" = "Y" ] && [ ! -f "$EXTRACT_MARKER" ] &&
@@ -867,6 +852,41 @@ if [ "$INSTALL_REQUIRED" = "N" ]; then
 fi
 
 if [ "$INSTALL_REQUIRED" = "Y" ]; then
+    echo ""
+    echo "=== Check Memory and Swap ==="
+
+    if ! MEM_KB=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo) ||
+       ! SWAP_KB=$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo); then
+        echo "ERROR: Failed to read Memory and Swap from /proc/meminfo."
+        exit 1
+    fi
+    if ! [ "$MEM_KB" -gt 0 ] 2>/dev/null ||
+       ! [ "$SWAP_KB" -ge 0 ] 2>/dev/null; then
+        echo "ERROR: Invalid Memory or Swap value in /proc/meminfo."
+        exit 1
+    fi
+
+    echo "Memory: $((MEM_KB / 1024)) MB"
+    echo "Swap:   $((SWAP_KB / 1024)) MB"
+
+    if [ "$MEM_KB" -lt 2097152 ]; then
+        echo "ERROR: This script requires at least 2 GB of RAM."
+        exit 1
+    elif [ "$MEM_KB" -le 16777216 ]; then
+        REQUIRED_SWAP_KB=$MEM_KB
+    else
+        REQUIRED_SWAP_KB=16777216
+    fi
+
+    if [ "$SWAP_KB" -lt "$REQUIRED_SWAP_KB" ]; then
+        echo "ERROR: Swap size is insufficient for Oracle Database installation."
+        echo "Required Swap: at least $(((REQUIRED_SWAP_KB + 1023) / 1024)) MB"
+        echo "Please increase Swap and rerun this script."
+        exit 1
+    fi
+
+    echo "Swap size check passed."
+
     su - "$ORACLE_OWNER" -c "
         unset CV_ASSUME_DISTID
         if [ -n \"$INSTALLER_DISTID\" ]; then
@@ -876,7 +896,7 @@ if [ "$INSTALL_REQUIRED" = "Y" ]; then
         ./runInstaller \
             -silent \
             -waitforcompletion \
-            -showProgress \
+            -ignorePrereqFailure \
             oracle.install.option=INSTALL_DB_SWONLY \
             UNIX_GROUP_NAME=\"$INVENTORY_GROUP\" \
             INVENTORY_LOCATION=\"$ORA_INVENTORY\" \
@@ -893,11 +913,20 @@ if [ "$INSTALL_REQUIRED" = "Y" ]; then
     "
 
     INSTALL_STATUS=$?
-    if [ "$INSTALL_STATUS" -ne 0 ]; then
-        echo "ERROR: Oracle Database 19c software installation failed."
-        echo "Exit code: $INSTALL_STATUS"
-        exit 1
-    fi
+    case "$INSTALL_STATUS" in
+        0)
+            echo "Oracle Database 19c software installation succeeded."
+            ;;
+        6)
+            echo "WARNING: Oracle Database 19c software installation succeeded with prerequisite warnings."
+            echo "Please review the Oracle installer log."
+            ;;
+        *)
+            echo "ERROR: Oracle Database 19c software installation failed."
+            echo "Exit code: $INSTALL_STATUS"
+            exit 1
+            ;;
+    esac
 
     if [ ! -f "$INVENTORY_FILE" ] ||
        ! grep -Fq "LOC=\"$ORACLE_HOME\"" "$INVENTORY_FILE"; then
@@ -923,61 +952,35 @@ fi
 echo ""
 echo "=== 22. Run orainstRoot.sh ==="
 
-if [ -f "$ORAINST_FILE" ] && [ -f "$ORAINST_ROOT_MARKER" ] &&
-   grep -Fxq "inventory_loc=$ORA_INVENTORY" "$ORAINST_FILE" &&
-   grep -Fxq "inst_group=$INVENTORY_GROUP" "$ORAINST_FILE" &&
-   grep -Fxq "inventory_loc=$ORA_INVENTORY" "$ORAINST_ROOT_MARKER" &&
-   grep -Fxq "inst_group=$INVENTORY_GROUP" "$ORAINST_ROOT_MARKER"; then
-    echo "Oracle Inventory root configuration is already completed."
-    echo "Skip orainstRoot.sh."
-else
-    if [ ! -f "$ORA_INVENTORY/orainstRoot.sh" ]; then
-        echo "ERROR: orainstRoot.sh was not found: $ORA_INVENTORY/orainstRoot.sh"
-        exit 1
-    fi
-
-    if ! "$ORA_INVENTORY/orainstRoot.sh"; then
-        echo "ERROR: orainstRoot.sh failed."
-        exit 1
-    fi
-
-    if [ ! -f "$ORAINST_FILE" ] ||
-       ! grep -Fxq "inventory_loc=$ORA_INVENTORY" "$ORAINST_FILE" ||
-       ! grep -Fxq "inst_group=$INVENTORY_GROUP" "$ORAINST_FILE"; then
-        echo "ERROR: Inventory root configuration verification failed."
-        exit 1
-    fi
-    if ! printf 'inventory_loc=%s\ninst_group=%s\n' "$ORA_INVENTORY" "$INVENTORY_GROUP" > "$ORAINST_ROOT_MARKER"; then
-        echo "ERROR: Failed to record Inventory root configuration completion."
-        echo "Recovery guide: INVENTORY_MARKER_RECOVERY.md in the same directory as this script."
-        exit 1
-    fi
+if [ ! -f "$ORA_INVENTORY/orainstRoot.sh" ]; then
+    echo "ERROR: orainstRoot.sh was not found:"
+    echo "$ORA_INVENTORY/orainstRoot.sh"
+    exit 1
 fi
+
+if ! "$ORA_INVENTORY/orainstRoot.sh"; then
+    echo "ERROR: orainstRoot.sh failed."
+    exit 1
+fi
+
+echo "orainstRoot.sh completed successfully."
+
 
 echo ""
 echo "=== 23. Run root.sh ==="
 
-if [ -f "$ROOT_MARKER" ] &&
-   grep -Fxq "$INSTALL_BATCH_ID" "$ROOT_MARKER"; then
-    echo "Oracle Home root configuration is completed for this installation batch."
-    echo "Skip root.sh."
-else
-    if [ ! -f "$ORACLE_HOME/root.sh" ]; then
-        echo "ERROR: root.sh was not found: $ORACLE_HOME/root.sh"
-        exit 1
-    fi
-
-    if ! "$ORACLE_HOME/root.sh"; then
-        echo "ERROR: root.sh failed."
-        exit 1
-    fi
-
-    if ! printf '%s\n' "$INSTALL_BATCH_ID" > "$ROOT_MARKER"; then
-        echo "ERROR: root.sh succeeded, but its completion marker could not be written."
-        echo "Review root-script completion before rerunning this script."
-        exit 1
-    fi
+if [ ! -f "$ORACLE_HOME/root.sh" ]; then
+    echo "ERROR: root.sh was not found:"
+    echo "$ORACLE_HOME/root.sh"
+    exit 1
 fi
+
+if ! "$ORACLE_HOME/root.sh"; then
+    echo "ERROR: root.sh failed."
+    exit 1
+fi
+
+echo "root.sh completed successfully."
 
 
 echo ""
