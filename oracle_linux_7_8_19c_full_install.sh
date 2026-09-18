@@ -661,7 +661,7 @@ fi
 
 echo "=== 19. Configure Oracle User Profile ==="
 
-echo "Switching to oracle user to configure .bash_profile..."
+echo "Switching to oracle user to configure shell startup files..."
 
 su - oracle -c "bash -s -- '$ORACLE_BASE' '$ORACLE_HOME'" <<'ORACLE_PROFILE_SCRIPT'
 
@@ -670,6 +670,8 @@ ORACLE_HOME_VALUE="$2"
 
 PROFILE_FILE="$HOME/.bash_profile"
 ALIAS_FILE="$HOME/.bash_alias"
+ENV_FILE="$HOME/.oracle_env"
+BASHRC_FILE="$HOME/.bashrc"
 
 echo ""
 echo "--- Configure Oracle DBA aliases ---"
@@ -679,14 +681,14 @@ if [ "$(id -un)" != "oracle" ]; then
     exit 1
 fi
 
-for TARGET_FILE in "$ALIAS_FILE" "$PROFILE_FILE"; do
+for TARGET_FILE in "$ALIAS_FILE" "$PROFILE_FILE" "$ENV_FILE" "$BASHRC_FILE"; do
     if [ -L "$TARGET_FILE" ] || { [ -e "$TARGET_FILE" ] && [ ! -f "$TARGET_FILE" ]; }; then
         echo "ERROR: Review symbolic link or non-regular profile path: $TARGET_FILE"
         exit 1
     fi
 done
 
-# This script manages both files and replaces their contents on each run.
+# This script manages the alias, environment, and login profile contents.
 if ! cat > "$ALIAS_FILE" <<'EOF'
 alias ORADATA="ls -lur /oradata/*_*/*/data/*.dbf"
 alias ORAPS="ps -ef | grep -iv 'grep' | egrep -i -n 'smon|lsnr'; df -h | grep -i /ora"
@@ -701,17 +703,23 @@ echo "Oracle DBA aliases configured: $ALIAS_FILE"
 echo "Current user: $(id -un)"
 echo "Profile file: $PROFILE_FILE"
 
-if ! cat > "$PROFILE_FILE" <<EOF
-if [ -f "\$HOME/.bashrc" ]; then
-    . "\$HOME/.bashrc"
+# Load once per shell and block recursive loading from the host profile.
+if ! cat > "$ENV_FILE" <<EOF
+if [ "\${ORACLE_ENV_SHELL_PID:-}" = "\$BASHPID" ]; then
+    return
 fi
+ORACLE_ENV_SHELL_PID=\$BASHPID
+ORACLE_ENV_LOADING=1
 
 umask 022
 
-export ORACLE_BASE=$ORACLE_BASE_VALUE
-export ORACLE_HOME=$ORACLE_HOME_VALUE
-export LD_LIBRARY_PATH=\$ORACLE_HOME/lib
-export PATH=\$ORACLE_HOME/bin:\$PATH
+export ORACLE_BASE="$ORACLE_BASE_VALUE"
+export ORACLE_HOME="$ORACLE_HOME_VALUE"
+export LD_LIBRARY_PATH="\$ORACLE_HOME/lib"
+case ":\$PATH:" in
+    *":\$ORACLE_HOME/bin:"*) ;;
+    *) export PATH="\$ORACLE_HOME/bin:\$PATH" ;;
+esac
 export EDITOR=vi
 
 HOST_PROFILE="\$HOME/.\$(hostname).profile"
@@ -723,9 +731,73 @@ fi
 if [ -f "\$HOME/.bash_alias" ]; then
     . "\$HOME/.bash_alias"
 fi
+unset ORACLE_ENV_LOADING
+EOF
+then
+    echo "ERROR: Failed to write $ENV_FILE"
+    exit 1
+fi
+
+if ! cat > "$PROFILE_FILE" <<'EOF'
+if [ "${ORACLE_ENV_LOADING:-0}" = "1" ]; then
+    return
+fi
+if [ -f "$HOME/.bashrc" ]; then
+    . "$HOME/.bashrc"
+fi
 EOF
 then
     echo "ERROR: Failed to write $PROFILE_FILE"
+    exit 1
+fi
+
+# Prepend the managed block so existing return/exit statements cannot bypass it.
+if ! PROFILE_STAGE_DIR="$(mktemp -d)"; then
+    echo "ERROR: Failed to create temporary shell configuration directory."
+    exit 1
+fi
+trap 'rm -rf -- "$PROFILE_STAGE_DIR"' EXIT
+
+if ! cat > "$PROFILE_STAGE_DIR/header" <<'EOF'
+# BEGIN ORACLE ENVIRONMENT
+if [ "${ORACLE_ENV_LOADING:-0}" = "1" ]; then
+    return
+fi
+if [ -f "$HOME/.oracle_env" ]; then
+    . "$HOME/.oracle_env"
+fi
+# END ORACLE ENVIRONMENT
+EOF
+then
+    echo "ERROR: Failed to prepare the .bashrc loading block."
+    exit 1
+fi
+
+if [ -f "$BASHRC_FILE" ] &&
+   head -n 8 "$BASHRC_FILE" | cmp -s "$PROFILE_STAGE_DIR/header" -; then
+    echo "Oracle environment loading block is already configured."
+else
+    if [ -f "$BASHRC_FILE" ] && grep -Fq '# BEGIN ORACLE ENVIRONMENT' "$BASHRC_FILE"; then
+        echo "ERROR: Existing Oracle loading block was modified or moved. Review $BASHRC_FILE"
+        exit 1
+    fi
+    if ! cp "$PROFILE_STAGE_DIR/header" "$PROFILE_STAGE_DIR/bashrc"; then
+        echo "ERROR: Failed to prepare .bashrc."
+        exit 1
+    fi
+    if [ -f "$BASHRC_FILE" ] && ! cat "$BASHRC_FILE" >> "$PROFILE_STAGE_DIR/bashrc"; then
+        echo "ERROR: Failed to preserve existing .bashrc content."
+        exit 1
+    fi
+    if ! cat "$PROFILE_STAGE_DIR/bashrc" > "$BASHRC_FILE"; then
+        echo "ERROR: Failed to write $BASHRC_FILE"
+        exit 1
+    fi
+fi
+
+if ! bash -n "$ENV_FILE" || ! bash -n "$PROFILE_FILE" ||
+   ! bash -n "$BASHRC_FILE" || ! bash -n "$ALIAS_FILE"; then
+    echo "ERROR: Shell startup file syntax validation failed."
     exit 1
 fi
 
@@ -734,11 +806,11 @@ echo "Oracle 19c environment configured successfully."
 ORACLE_PROFILE_SCRIPT
 
 if [ $? -ne 0 ]; then
-    echo "ERROR: Failed to configure oracle .bash_profile."
+    echo "ERROR: Failed to configure oracle shell startup files."
     exit 1
 fi
 
-echo "Oracle .bash_profile configuration completed."
+echo "Oracle shell startup configuration completed."
 
 echo ""
 echo "=== 20. Extract Oracle 19c Database Home ==="
@@ -1088,6 +1160,7 @@ fi
 echo "Oracle 19c Home: $ORACLE_HOME"
 echo "Oracle Database 19c installer success and Inventory registration were verified."
 echo "Reboot is required to fully disable SELinux."
-echo "After login as oracle, run: . ~/.bash_profile"
+echo "New oracle Bash terminals load ~/.oracle_env automatically."
+echo "For an existing oracle session, run once: . ~/.oracle_env"
 
 exit 0
