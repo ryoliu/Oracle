@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# Do not trace input values or password handling.
+set +x +v
+unset ORACLE_PASSWORD DB_PASSWORD PASSWORD_CONFIRM DB_PASSWORD_RSP
+
 # Oracle Linux 7 / 8 preparation and Oracle Database 19c software installation
 # Run this script as root.
 # The Oracle 19c ZIP can be copied by root before ORACLE_OWNER exists.
@@ -23,11 +27,37 @@ ORA_INVENTORY="/opt/oraInventory"
 ORAINST_FILE="/etc/oraInst.loc"
 ORACLE_OWNER="oracle"
 ORACLE_GROUP="oinstall"
+# Database settings apply only with --create-db.
+DATA_DIR="/opt/oracle/oradata"
+FRA_DIR="/opt/oracle/fast_recovery_area"
+TOTAL_MEMORY_MB=2048
+FRA_SIZE_MB=10240
+CHARACTER_SET="AL32UTF8"
+NATIONAL_CHARACTER_SET="AL16UTF16"
+LISTENER_PORT=1522
+DB_SERVICE=""
+DB_HOST="$(hostname -f 2>/dev/null)"
+LOCAL_BIN_DIR="/usr/local/bin"
+CREATE_DB=0
+DB_SECRET_DIR=""
+DB_WORKER_PID=""
+CURRENT_STAGE="input validation"
 PASSWORD_RESET_REQUESTED=0
 ORACLE_PASSWORD_STATUS="preserved"
 
 for SCRIPT_OPTION in "$@"; do
     case "$SCRIPT_OPTION" in
+        --create-db)
+            CREATE_DB=1
+            ;;
+        --help)
+            echo "Usage: $0 [--create-db] [--la-paz] [--set-password] [--help]"
+            echo "Default: prepare Oracle Linux and install Oracle 19c software only."
+            echo "--create-db: also create a single-instance non-CDB after installation."
+            echo "--set-password: reset the existing oracle OS account password."
+            echo "--la-paz: use America/La_Paz instead of Asia/Taipei."
+            exit 0
+            ;;
         --la-paz)
             TIMEZONE="America/La_Paz"
             ;;
@@ -36,11 +66,31 @@ for SCRIPT_OPTION in "$@"; do
             ;;
         *)
             echo "ERROR: Unknown option: $SCRIPT_OPTION"
-            echo "Usage: $0 [--la-paz] [--set-password]"
+            echo "Usage: $0 [--create-db] [--la-paz] [--set-password] [--help]"
             exit 1
             ;;
     esac
 done
+
+# Only remove the exact temporary files created by this invocation.
+cleanup_install() {
+    INSTALL_EXIT_CODE=$?
+    if [ -n "$DB_WORKER_PID" ]; then
+        kill -TERM "$DB_WORKER_PID" 2>/dev/null || true
+        wait "$DB_WORKER_PID" 2>/dev/null || true
+    fi
+    if [ -n "$DB_SECRET_DIR" ]; then
+        rm -f -- "$DB_SECRET_DIR/dbca.rsp" "$DB_SECRET_DIR/connect.sql"
+        rmdir -- "$DB_SECRET_DIR"
+    fi
+    unset ORACLE_PASSWORD DB_PASSWORD PASSWORD_CONFIRM DB_PASSWORD_RSP
+    if [ "$INSTALL_EXIT_CODE" -ne 0 ]; then
+        echo "ERROR: Stopped during $CURRENT_STAGE. Existing installation and database resources were retained."
+    fi
+}
+trap cleanup_install EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 echo "========================================"
 echo " Oracle Linux 7 / 8 and Oracle 19c"
@@ -83,6 +133,84 @@ case "$ID:${VERSION_ID%%.*}" in
         exit 1
         ;;
 esac
+
+# Collect all user input before installing packages or changing the system.
+if [ ! -t 0 ] || [ ! -t 1 ]; then
+    echo "ERROR: Run this script in an interactive terminal."
+    exit 1
+fi
+if [ "$ORACLE_USER_EXISTED_BEFORE_PREINSTALL" -eq 0 ] ||
+   [ "$PASSWORD_RESET_REQUESTED" -eq 1 ] || [ "$CREATE_DB" -eq 1 ]; then
+    if ! command -v dialog >/dev/null 2>&1; then
+        echo "ERROR: Install dialog before running this script."
+        exit 1
+    fi
+fi
+if [ "$ORACLE_USER_EXISTED_BEFORE_PREINSTALL" -eq 0 ] || [ "$PASSWORD_RESET_REQUESTED" -eq 1 ]; then
+    if ! ORACLE_PASSWORD=$(dialog --stdout --title "Oracle OS Account" --passwordbox "Enter the oracle OS account password:" 10 72) ||
+       ! PASSWORD_CONFIRM=$(dialog --stdout --title "Oracle OS Account" --passwordbox "Confirm the oracle OS account password:" 10 72); then
+        echo "Cancelled before system changes."
+        exit 1
+    fi
+    if [ -z "$ORACLE_PASSWORD" ] || [ "$ORACLE_PASSWORD" != "$PASSWORD_CONFIRM" ] ||
+       [[ "$ORACLE_PASSWORD" == *$'\n'* || "$ORACLE_PASSWORD" == *$'\r'* ]]; then
+        echo "ERROR: OS passwords must match, be nonempty and contain no line breaks."
+        exit 1
+    fi
+    unset PASSWORD_CONFIRM
+fi
+if [ "$CREATE_DB" -eq 1 ]; then
+    if ! ORACLE_SID=$(dialog --stdout --title "Create Database" --inputbox "Enter SID (1-8 uppercase letters or digits, starting with a letter):" 10 76) ||
+       ! LISTENER_PORT=$(dialog --stdout --title "Create Database" --inputbox "Enter Listener TCP port (1024-65535):" 10 72 "$LISTENER_PORT"); then
+        echo "Cancelled before system changes."
+        exit 1
+    fi
+    if [[ ! "$ORACLE_SID" =~ ^[A-Z][A-Z0-9]{0,7}$ ]] ||
+       [[ ! "$LISTENER_PORT" =~ ^[1-9][0-9]{3,4}$ ]] ||
+       [ "$LISTENER_PORT" -lt 1024 ] || [ "$LISTENER_PORT" -gt 65535 ]; then
+        echo "ERROR: Invalid SID or Listener port."
+        exit 1
+    fi
+    if [ -z "$DB_SERVICE" ]; then DB_SERVICE="$ORACLE_SID"; fi
+    if [[ ! "$DB_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] ||
+       [[ ! "$DB_SERVICE" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] ||
+       [[ ! "$TOTAL_MEMORY_MB" =~ ^[1-9][0-9]{0,6}$ ]] ||
+       [[ ! "$FRA_SIZE_MB" =~ ^[1-9][0-9]{0,6}$ ]]; then
+        echo "ERROR: Review database host, service, memory and FRA settings."
+        exit 1
+    fi
+    for STORAGE_ROOT in "$DATA_DIR" "$FRA_DIR"; do
+        if [[ "$STORAGE_ROOT" != /* ]] || [ "$STORAGE_ROOT" = / ]; then
+            echo "ERROR: Use an absolute storage root other than /."
+            exit 1
+        fi
+    done
+    if ! DB_PASSWORD=$(dialog --stdout --title "Database Password" --passwordbox "Enter the shared SYS/SYSTEM password (no double quotes or control characters):" 10 78) ||
+       ! PASSWORD_CONFIRM=$(dialog --stdout --title "Database Password" --passwordbox "Confirm the shared SYS/SYSTEM password:" 10 72); then
+        echo "Cancelled before system changes."
+        exit 1
+    fi
+    if [ -z "$DB_PASSWORD" ] || [ "$DB_PASSWORD" != "$PASSWORD_CONFIRM" ] ||
+       [[ "$DB_PASSWORD" == *'"'* || "$DB_PASSWORD" =~ [[:cntrl:]] ]]; then
+        echo "ERROR: DB passwords must match, be nonempty and contain no double quotes or control characters."
+        exit 1
+    fi
+    unset PASSWORD_CONFIRM
+fi
+echo "=== Installation settings ==="
+echo "Oracle Home: $ORACLE_HOME; Base: $ORACLE_BASE; timezone: $TIMEZONE"
+echo "root.sh local bin: $LOCAL_BIN_DIR; existing helper scripts will be preserved."
+if [ "$CREATE_DB" -eq 1 ]; then
+    echo "Mode: software and database; SID: $ORACLE_SID; Listener: LSNR_$ORACLE_SID:$LISTENER_PORT"
+    echo "Host: $DB_HOST; service: $DB_SERVICE; DATA: $DATA_DIR; FRA: $FRA_DIR"
+    echo "Database memory: $TOTAL_MEMORY_MB MB; FRA limit: $FRA_SIZE_MB MB"
+    echo "Character sets: $CHARACTER_SET / $NATIONAL_CHARACTER_SET"
+else
+    echo "Mode: software only; no Listener or database will be created."
+fi
+
+CURRENT_STAGE="software installation"
+# BEGIN SOFTWARE INSTALLATION
 
 if [ -f /etc/oracle-release ]; then
     cat /etc/oracle-release
@@ -328,36 +456,8 @@ fi
 if [ "$ORACLE_USER_EXISTED_BEFORE_PREINSTALL" -eq 0 ] ||
    [ "$PASSWORD_RESET_REQUESTED" -eq 1 ]; then
     echo ""
-    echo "=== Oracle User Password ==="
+    echo "=== Apply the previously entered Oracle OS password ==="
 
-    if ! IFS= read -r -s -p "Enter password for oracle user: " ORACLE_PASSWORD; then
-        echo ""
-        echo "ERROR: Failed to read the oracle user password."
-        exit 1
-    fi
-    echo ""
-
-    if ! IFS= read -r -s -p "Confirm password for oracle user: " ORACLE_PASSWORD_CONFIRM; then
-        echo ""
-        unset ORACLE_PASSWORD
-        echo "ERROR: Failed to read the oracle user password confirmation."
-        exit 1
-    fi
-    echo ""
-
-    if [ -z "$ORACLE_PASSWORD" ]; then
-        unset ORACLE_PASSWORD ORACLE_PASSWORD_CONFIRM
-        echo "ERROR: Oracle password cannot be empty."
-        exit 1
-    fi
-
-    if [ "$ORACLE_PASSWORD" != "$ORACLE_PASSWORD_CONFIRM" ]; then
-        unset ORACLE_PASSWORD ORACLE_PASSWORD_CONFIRM
-        echo "ERROR: Passwords do not match."
-        exit 1
-    fi
-
-    unset ORACLE_PASSWORD_CONFIRM
     echo "Setting password for oracle user..."
 
     if ! printf '%s:%s\n' "$ORACLE_OWNER" "$ORACLE_PASSWORD" | chpasswd; then
@@ -1047,7 +1147,14 @@ if [ ! -f "$ORACLE_HOME/root.sh" ]; then
     exit 1
 fi
 
-if ! "$ORACLE_HOME/root.sh"; then
+# Answer the standard local-bin prompt and preserve existing helper scripts.
+if ! "$ORACLE_HOME/root.sh" <<ROOT_SCRIPT_INPUT
+$LOCAL_BIN_DIR
+n
+n
+n
+ROOT_SCRIPT_INPUT
+then
     echo "ERROR: root.sh failed."
     exit 1
 fi
@@ -1149,6 +1256,489 @@ echo "ORACLE_HOME=$ORACLE_HOME"
 su - oracle -c "cat ~/.bash_profile 2>/dev/null"
 
 echo ""
+# END SOFTWARE INSTALLATION
+
+if [ "$CREATE_DB" -eq 1 ]; then
+    CURRENT_STAGE="database creation"
+    echo "=== Create and verify the database as oracle ==="
+    DBCA_TEMPLATE="$ORACLE_HOME/assistants/dbca/dbca.rsp"
+    if [ ! -r "$DBCA_TEMPLATE" ]; then
+        echo "ERROR: Missing DBCA response template: $DBCA_TEMPLATE"
+        exit 1
+    fi
+    umask 077
+    if ! DB_SECRET_DIR=$(mktemp -d /tmp/oracle_db_credentials.XXXXXX); then exit 1; fi
+    if ! chmod 700 "$DB_SECRET_DIR"; then exit 1; fi
+    # DBCA response values follow Java properties escaping, not shell quoting.
+    DB_PASSWORD_RSP=${DB_PASSWORD//\\/\\\\}
+    DB_PASSWORD_RSP=${DB_PASSWORD_RSP// /\\ }
+    if ! sed '/^[[:space:]]*sysPassword[[:space:]]*=/d; /^[[:space:]]*systemPassword[[:space:]]*=/d' \
+        "$DBCA_TEMPLATE" > "$DB_SECRET_DIR/dbca.rsp" ||
+       ! printf '\nsysPassword=%s\nsystemPassword=%s\n' "$DB_PASSWORD_RSP" "$DB_PASSWORD_RSP" >> "$DB_SECRET_DIR/dbca.rsp"; then
+        echo "ERROR: Cannot prepare the DBCA response file."
+        exit 1
+    fi
+    if ! printf 'SET ECHO OFF VERIFY OFF DEFINE OFF\nWHENEVER OSERROR EXIT FAILURE\nWHENEVER SQLERROR EXIT FAILURE\nCONNECT system/"%s"@%s\n' \
+        "$DB_PASSWORD" "$ORACLE_SID" > "$DB_SECRET_DIR/connect.sql"; then
+        echo "ERROR: Cannot prepare the SQL*Plus login file."
+        exit 1
+    fi
+    if ! chmod 600 "$DB_SECRET_DIR/dbca.rsp" "$DB_SECRET_DIR/connect.sql" ||
+       ! chown "$ORACLE_OWNER:$ORACLE_GROUP" "$DB_SECRET_DIR" "$DB_SECRET_DIR/dbca.rsp" "$DB_SECRET_DIR/connect.sql"; then
+        echo "ERROR: Cannot protect database credential files."
+        exit 1
+    fi
+    unset DB_PASSWORD DB_PASSWORD_RSP
+    # Only non-secret settings and the private directory path are arguments.
+    runuser -u "$ORACLE_OWNER" -- bash --noprofile --norc -s -- \
+        "$ORACLE_BASE" "$ORACLE_HOME" "$ORACLE_SID" "$LISTENER_PORT" \
+        "$DB_HOST" "$DB_SERVICE" "$DATA_DIR" "$FRA_DIR" \
+        "$TOTAL_MEMORY_MB" "$FRA_SIZE_MB" "$DB_SECRET_DIR" \
+        "$CHARACTER_SET" "$NATIONAL_CHARACTER_SET" <<'ORACLE_DATABASE_SCRIPT' &
+set +x +v
+umask 077
+ORACLE_BASE="$1"
+ORACLE_HOME="$2"
+ORACLE_SID="$3"
+LISTENER_PORT="$4"
+DB_HOST="$5"
+DB_SERVICE="$6"
+DATA_DIR="$7"
+FRA_DIR="$8"
+TOTAL_MEMORY_MB="$9"
+FRA_SIZE_MB="${10}"
+DB_SECRET_DIR="${11}"
+CHARACTER_SET="${12}"
+NATIONAL_CHARACTER_SET="${13}"
+DB_NAME="$ORACLE_SID"
+DB_UNIQUE_NAME="$ORACLE_SID"
+LISTENER_NAME="LSNR_$ORACLE_SID"
+HOST_PROFILE="$HOME/.$(hostname).profile"
+WORK_DIR=""
+PROFILE_TEMP=""
+cleanup_db_work() {
+    if [ -n "$WORK_DIR" ]; then
+        rm -f -- "$WORK_DIR/netca.rsp" "$WORK_DIR/tnsnames.ora" "$WORK_DIR/verify.sql"
+        rmdir -- "$WORK_DIR"
+    fi
+    if [ -n "$PROFILE_TEMP" ]; then rm -f -- "$PROFILE_TEMP"; fi
+}
+trap cleanup_db_work EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [ "$(id -un)" != oracle ]; then
+    echo "ERROR: Database work must run as oracle."
+    exit 1
+fi
+if [ -L "$HOST_PROFILE" ] || { [ -e "$HOST_PROFILE" ] && [ ! -f "$HOST_PROFILE" ]; }; then
+    echo "ERROR: Host profile must be a regular file."
+    exit 1
+fi
+if ! command -v ss >/dev/null 2>&1; then
+    echo "ERROR: Missing command: ss"
+    exit 1
+fi
+
+update_tns_alias() {
+    TNS_FILE="$TNS_ADMIN/tnsnames.ora"
+    TNS_INPUT="$TNS_FILE"
+    if [ ! -e "$TNS_FILE" ]; then
+        TNS_INPUT=/dev/null
+    fi
+    if [ -L "$TNS_FILE" ] || [ ! -r "$TNS_INPUT" ]; then
+        echo "ERROR: TNS file must be readable and must not be a symlink."
+        exit 1
+    fi
+    # Parse complete parenthesized entries, never replace arbitrary matching lines.
+    # Unsupported syntax is rejected without changing the original file.
+    if ! awk -v alias="$ORACLE_SID" -v host="$DB_HOST" -v port="$LISTENER_PORT" -v service="$DB_SERVICE" '
+    function compact(value) {
+        gsub(/[[:space:]]/, "", value)
+        value=toupper(value)
+        gsub(/\(SERVER=DEDICATED\)/, "", value)
+        # A single ADDRESS_LIST wrapper does not change the target endpoint.
+        sub(/\(ADDRESS_LIST=\(ADDRESS=/, "(ADDRESS=", value)
+        sub(/\)\)\)\(CONNECT_DATA=/, "))(CONNECT_DATA=", value)
+        return value
+    }
+    function fail() { bad=1; exit 1 }
+    function finish(    header, names, count, i, target) {
+        header=substr(clean,1,index(clean,"=")-1)
+        gsub(/[[:space:]]/, "", header)
+        if (header !~ /^[A-Za-z0-9_.-]+(,[A-Za-z0-9_.-]+)*$/) fail()
+        count=split(header,names,",")
+        for (i=1;i<=count;i++) if (toupper(names[i])==toupper(alias)) target=1
+        if (target) {
+            if (count!=1 || found++) fail()
+            if (compact(clean)==compact(desired)) output=output raw
+            else output=output desired "\n"
+        } else output=output raw
+        raw=""; clean=""; opened=0
+    }
+    BEGIN {
+        desired=alias " =\n  (DESCRIPTION =\n    (ADDRESS = (PROTOCOL = TCP)(HOST = " host ")(PORT = " port "))\n    (CONNECT_DATA = (SERVICE_NAME = " service "))\n  )"
+    }
+    {
+        line=$0
+        sub(/#.*/, "", line)
+        if (line ~ /["\047\\]/ || toupper(line) ~ /^[[:space:]]*IFILE[[:space:]]*=/) fail()
+        if (raw=="" && line ~ /^[[:space:]]*$/) { output=output $0 "\n"; next }
+        raw=raw $0 "\n"; clean=clean line "\n"
+        for (i=1;i<=length(line);i++) {
+            ch=substr(line,i,1)
+            if (ch=="(") { depth++; opened=1 }
+            if (ch==")") {
+                depth--
+                if (depth<0) fail()
+                if (depth==0 && substr(line,i+1) !~ /^[[:space:]]*$/) fail()
+            }
+        }
+        if (opened && depth==0) finish()
+    }
+    END {
+        if (bad || raw!="" || depth!=0) exit 1
+        if (!found) output=output "\n" desired "\n"
+        printf "%s", output
+    }' "$TNS_INPUT" > "$WORK_DIR/tnsnames.ora"; then
+        echo "ERROR: TNS update refused: malformed syntax, IFILE, quotes, escapes, duplicate alias or shared target alias."
+        echo "Review $TNS_FILE manually. The file was not changed by the updater."
+        exit 1
+    fi
+    if cmp -s "$TNS_INPUT" "$WORK_DIR/tnsnames.ora"; then
+        echo "DB connection alias is already configured; skipping update."
+    else
+        if [ -f "$TNS_FILE" ]; then
+            if [ ! -e "$TNS_FILE.pre_alias.bak" ]; then
+                if ! cp -p "$TNS_FILE" "$TNS_FILE.pre_alias.bak"; then
+                    exit 1
+                fi
+            fi
+            if ! chmod --reference="$TNS_FILE" "$WORK_DIR/tnsnames.ora"; then
+                exit 1
+            fi
+        else
+            if ! chmod 640 "$WORK_DIR/tnsnames.ora"; then
+                exit 1
+            fi
+        fi
+        if ! mv "$WORK_DIR/tnsnames.ora" "$TNS_FILE"; then
+            exit 1
+        fi
+        echo "DB connection alias updated; unrelated entries retained."
+    fi
+}
+
+for TOOL in netca dbca lsnrctl sqlplus tnsping; do
+    if [ ! -x "$ORACLE_HOME/bin/$TOOL" ]; then
+        echo "ERROR: Missing Oracle tool: $TOOL"
+        exit 1
+    fi
+done
+NETCA_TEMPLATE="$ORACLE_HOME/assistants/netca/netca.rsp"
+if [ ! -r "$NETCA_TEMPLATE" ]; then
+    echo "ERROR: Cannot read $NETCA_TEMPLATE"
+    exit 1
+fi
+if [ ! -r /etc/oratab ] || [ ! -r "$ORACLE_HOME/dbs" ]; then
+    echo "ERROR: Check dbs permissions and /etc/oratab."
+    exit 1
+fi
+if [ -n "${TNS_ADMIN:-}" ] && [ "$TNS_ADMIN" != "$ORACLE_HOME/network/admin" ]; then
+    echo "ERROR: TNS_ADMIN points outside this Oracle Home."
+    exit 1
+fi
+unset TWO_TASK LOCAL ORACLE_PDB_SID
+export ORACLE_BASE ORACLE_HOME ORACLE_SID
+export TNS_ADMIN="$ORACLE_HOME/network/admin"
+export LD_LIBRARY_PATH="$ORACLE_HOME/lib"
+export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
+
+echo "=== Preflight: Check target database and files ==="
+if ! REGISTERED_DB=$(awk -F: -v name="$DB_NAME" '$0 !~ /^[[:space:]]*#/ && toupper($1)==name {print}' /etc/oratab); then
+    exit 1
+fi
+if ! PROCESSES=$(ps -eo args=); then
+    exit 1
+fi
+if [ -n "$REGISTERED_DB" ] || printf '%s\n' "$PROCESSES" | grep -Eiq "^ora_pmon_$ORACLE_SID([[:space:]]|$)"; then
+    echo "ERROR: Target DB already exists. Other names may remain; this target will not be recreated."
+    exit 1
+fi
+if ! DB_FILES=$(find "$ORACLE_HOME/dbs" -maxdepth 1 \( -iname "spfile$ORACLE_SID.ora" -o -iname "init$ORACLE_SID.ora" -o -iname "orapw$ORACLE_SID" -o -iname "lk$ORACLE_SID" \) -print); then
+    exit 1
+fi
+if [ -n "$DB_FILES" ]; then
+    echo "ERROR: Target DB files exist: $DB_FILES"
+    exit 1
+fi
+for ROOT_DIR in "$DATA_DIR" "$FRA_DIR"; do
+    if [[ "$ROOT_DIR" != /* ]] || [ "$ROOT_DIR" = / ] || [ -L "$ROOT_DIR/$DB_UNIQUE_NAME" ]; then
+        echo "ERROR: Use an absolute storage root and no symlink for the target DB directory."
+        exit 1
+    fi
+    if [ -e "$ROOT_DIR" ]; then
+        if [ ! -d "$ROOT_DIR" ] || [ ! -r "$ROOT_DIR" ] || [ ! -x "$ROOT_DIR" ]; then
+            echo "ERROR: Cannot inspect $ROOT_DIR"
+            exit 1
+        fi
+        if ! DB_FILES=$(find "$ROOT_DIR" -mindepth 1 -maxdepth 1 -iname "$DB_UNIQUE_NAME" -print); then
+            exit 1
+        fi
+        if [ -n "$DB_FILES" ]; then
+            echo "ERROR: Target DB directory already exists: $DB_FILES"
+            exit 1
+        fi
+    fi
+done
+
+echo "=== Preflight: Check dedicated Listener and port ==="
+LISTENER_FILE="$TNS_ADMIN/listener.ora"
+if [ -e "$LISTENER_FILE" ]; then
+    if [ ! -r "$LISTENER_FILE" ]; then
+        echo "ERROR: Cannot read $LISTENER_FILE"
+        exit 1
+    fi
+    if ! CONFIG=$(sed 's/#.*//' "$LISTENER_FILE"); then
+        exit 1
+    fi
+    if printf '%s\n' "$CONFIG" | grep -Eiq '^[[:space:]]*IFILE[[:space:]]*='; then
+        echo "ERROR: Review included Listener configuration manually before using this simple script."
+        exit 1
+    fi
+    if printf '%s\n' "$CONFIG" | grep -Eiq "^[[:space:]]*$LISTENER_NAME[[:space:]]*=" ||
+       printf '%s\n' "$CONFIG" | tr -d '[:space:]' | grep -Eiq "\\(PORT=0*$LISTENER_PORT\\)"; then
+        echo "ERROR: Listener name or port is already configured. Select a new name/port."
+        exit 1
+    fi
+fi
+if printf '%s\n' "$PROCESSES" | grep -Eiq "(^|/)tnslsnr[[:space:]]+$LISTENER_NAME([[:space:]]|$)"; then
+    echo "ERROR: Target Listener is already running."
+    exit 1
+fi
+if ! SOCKETS=$(ss -H -ltn); then
+    exit 1
+fi
+if printf '%s\n' "$SOCKETS" | awk '{print $4}' | grep -Eq ":$LISTENER_PORT$"; then
+    echo "ERROR: TCP port $LISTENER_PORT is in use."
+    exit 1
+fi
+
+echo "=== Review memory before creating resources ==="
+AVAILABLE_MB=$(awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo)
+echo "Available RAM: ${AVAILABLE_MB:-unknown} MB; database memory: $TOTAL_MEMORY_MB MB."
+echo "Memory is informational; allow capacity for the OS and other databases."
+if ! mkdir -p "$DATA_DIR" "$FRA_DIR"; then
+    echo "ERROR: Cannot create storage roots."
+    exit 1
+fi
+echo "Database: $DB_NAME; Listener: $LISTENER_NAME:$LISTENER_PORT"
+echo "DATA: $DATA_DIR/$DB_UNIQUE_NAME; FRA: $FRA_DIR/$DB_UNIQUE_NAME"
+
+echo "=== 2. Create and start Listener with NETCA ==="
+if ! mkdir -p "$TNS_ADMIN"; then
+    exit 1
+fi
+# Preserve the first backup before either assistant changes network settings.
+for CONFIG_FILE in listener.ora sqlnet.ora tnsnames.ora; do
+    if [ -f "$TNS_ADMIN/$CONFIG_FILE" ] && [ ! -e "$TNS_ADMIN/$CONFIG_FILE.pre_create.bak" ]; then
+        if ! cp -p "$TNS_ADMIN/$CONFIG_FILE" "$TNS_ADMIN/$CONFIG_FILE.pre_create.bak"; then
+            exit 1
+        fi
+    fi
+done
+if ! WORK_DIR=$(mktemp -d "$TNS_ADMIN/.create_db.XXXXXX"); then
+    exit 1
+fi
+# Use the installed response template so its version and sections remain intact.
+for KEY in LISTENER_NUMBER LISTENER_NAMES LISTENER_PROTOCOLS LISTENER_START; do
+    if ! grep -Eq "^[[:space:]]*$KEY[[:space:]]*=" "$NETCA_TEMPLATE"; then
+        echo "ERROR: Missing NETCA template setting: $KEY"
+        exit 1
+    fi
+done
+if ! sed -e "s/^[[:space:]]*LISTENER_NUMBER[[:space:]]*=.*/LISTENER_NUMBER=1/" \
+    -e "s/^[[:space:]]*LISTENER_NAMES[[:space:]]*=.*/LISTENER_NAMES={\"$LISTENER_NAME\"}/" \
+    -e "s/^[[:space:]]*LISTENER_PROTOCOLS[[:space:]]*=.*/LISTENER_PROTOCOLS={\"TCP;$LISTENER_PORT\"}/" \
+    -e "s/^[[:space:]]*LISTENER_START[[:space:]]*=.*/LISTENER_START=\"$LISTENER_NAME\"/" \
+    -e '/^[[:space:]]*NSN_NUMBER[[:space:]]*=/d' \
+    -e '/^[[:space:]]*\[oracle.net.ca\][[:space:]]*$/a NSN_NUMBER=0' \
+    "$NETCA_TEMPLATE" > "$WORK_DIR/netca.rsp"; then exit 1; fi
+if ! grep -q '^NSN_NUMBER=0$' "$WORK_DIR/netca.rsp"; then
+    echo "ERROR: Missing NETCA response section."
+    exit 1
+fi
+if ! "$ORACLE_HOME/bin/netca" -silent -responsefile "$WORK_DIR/netca.rsp" </dev/null; then
+    echo "ERROR: NETCA failed. Review its log and retained configuration before retrying."
+    exit 1
+fi
+if ! LISTENER_STATUS=$("$ORACLE_HOME/bin/lsnrctl" status "$LISTENER_NAME"); then
+    echo "ERROR: NETCA did not start the target Listener."
+    exit 1
+fi
+printf '%s\n' "$LISTENER_STATUS"
+if ! printf '%s\n' "$LISTENER_STATUS" | tr -d '[:space:]' | grep -Fiq "(HOST=$DB_HOST)(PORT=$LISTENER_PORT)"; then
+    echo "ERROR: Listener endpoint does not match DB_HOST and LISTENER_PORT. Review before DBCA."
+    exit 1
+fi
+
+echo "=== 3. Create Database with DBCA ==="
+"$ORACLE_HOME/bin/dbca" -silent -createDatabase -responseFile "$DB_SECRET_DIR/dbca.rsp" \
+    -templateName General_Purpose.dbc \
+    -gdbName "$DB_NAME" -sid "$ORACLE_SID" \
+    -initParams "db_unique_name=$DB_UNIQUE_NAME" \
+    -databaseConfigType SINGLE -createAsContainerDatabase false \
+    -databaseType MULTIPURPOSE -storageType FS -useOMF true \
+    -datafileDestination "$DATA_DIR" \
+    -recoveryAreaDestination "$FRA_DIR" -recoveryAreaSize "$FRA_SIZE_MB" \
+    -characterSet "$CHARACTER_SET" -nationalCharacterSet "$NATIONAL_CHARACTER_SET" \
+    -memoryMgmtType AUTO_SGA -totalMemory "$TOTAL_MEMORY_MB" \
+    -listeners "$LISTENER_NAME" \
+    -enableArchive false -emConfiguration NONE -sampleSchema false </dev/null
+
+DBCA_RC=$?
+if [ "$DBCA_RC" -ne 0 ]; then
+    echo "ERROR: DBCA returned $DBCA_RC. Review $ORACLE_BASE/cfgtoollogs/dbca/$DB_NAME."
+    echo "Existing files are retained. No automatic retry or cleanup was performed."
+    exit "$DBCA_RC"
+fi
+echo "=== 4-5. Set LOCAL_LISTENER and register ==="
+# Use an explicit address for both default and custom ports to remove stale aliases.
+if ! "$ORACLE_HOME/bin/sqlplus" -L -s / as sysdba <<SQL
+WHENEVER OSERROR EXIT FAILURE
+WHENEVER SQLERROR EXIT FAILURE
+SET ECHO OFF VERIFY OFF
+SHOW PARAMETER local_listener
+ALTER SYSTEM SET LOCAL_LISTENER='(ADDRESS=(PROTOCOL=TCP)(HOST=$DB_HOST)(PORT=$LISTENER_PORT))' SCOPE=BOTH;
+ALTER SYSTEM REGISTER;
+EXIT SUCCESS
+SQL
+then
+    echo "ERROR: Listener configuration or registration failed. Database is retained."
+    exit 1
+fi
+
+echo "=== 6. Create or update the DB connection alias ==="
+update_tns_alias
+
+echo "=== 7. Verify Listener and client connectivity ==="
+if ! "$ORACLE_HOME/bin/lsnrctl" status "$LISTENER_NAME" ||
+   ! "$ORACLE_HOME/bin/lsnrctl" services "$LISTENER_NAME" ||
+   ! "$ORACLE_HOME/bin/tnsping" "$ORACLE_SID"; then
+    echo "ERROR: Listener or TNS verification failed."
+    exit 1
+fi
+echo "Review the service listing above: the target instance should have READY status."
+if ! cat > "$WORK_DIR/verify.sql" <<SQL
+WHENEVER OSERROR EXIT FAILURE
+WHENEVER SQLERROR EXIT FAILURE
+SET ECHO OFF VERIFY OFF DEFINE OFF
+@"$DB_SECRET_DIR/connect.sql"
+SELECT SYS_CONTEXT('USERENV','INSTANCE_NAME') AS instance_name,
+       SYS_CONTEXT('USERENV','SERVICE_NAME') AS service_name,
+       SYS_CONTEXT('USERENV','CON_NAME') AS container_name FROM dual;
+BEGIN
+    IF LOWER(SYS_CONTEXT('USERENV','INSTANCE_NAME')) <> LOWER('$ORACLE_SID')
+       OR LOWER(SYS_CONTEXT('USERENV','SERVICE_NAME')) <> LOWER('$DB_SERVICE')
+       OR LOWER(SYS_CONTEXT('USERENV','CON_NAME')) <> LOWER('$DB_NAME') THEN
+        RAISE_APPLICATION_ERROR(-20002, 'Connected to an unexpected database target');
+    END IF;
+END;
+/
+EXIT SUCCESS
+SQL
+then
+    exit 1
+fi
+echo "Verify the SYSTEM connection using the password collected at startup."
+if ! "$ORACLE_HOME/bin/sqlplus" -L -s /nolog "@$WORK_DIR/verify.sql" </dev/null; then
+    echo "ERROR: SYSTEM connection or target verification failed."
+    exit 1
+fi
+echo "Database creation and verification completed successfully."
+
+echo "=== Save database settings in the host profile ==="
+PROFILE_INPUT="$HOST_PROFILE"
+if [ ! -e "$HOST_PROFILE" ]; then
+    PROFILE_INPUT=/dev/null
+fi
+if ! PROFILE_TEMP=$(mktemp "$HOME/.db_profile.XXXXXX"); then
+    exit 1
+fi
+# Replace the managed block. Migrate simple assignments from older versions once.
+if ! awk '
+    /^# BEGIN ORACLE DATABASE SETTINGS$/ {
+        if (inside || seen++) exit 1
+        inside=1
+        next
+    }
+    /^# END ORACLE DATABASE SETTINGS$/ {
+        if (!inside) exit 1
+        inside=0
+        next
+    }
+    inside { next }
+    /^[[:space:]]*(export[[:space:]]+)?(ORACLE_SID|DB_NAME|DB_UNIQUE_NAME)=/ {
+        if ($0 !~ /^[[:space:]]*(export[[:space:]]+)?(ORACLE_SID|DB_NAME|DB_UNIQUE_NAME)=("[A-Za-z0-9_$./{}-]*"|[A-Za-z0-9_$./{}-]+)[[:space:]]*(#.*)?$/) exit 1
+        next
+    }
+    { print }
+    END { if (inside) exit 1 }
+' "$PROFILE_INPUT" > "$PROFILE_TEMP"; then
+    echo "ERROR: Cannot safely update profile assignments; original retained. Review $HOST_PROFILE."
+    exit 1
+fi
+if ! cat >> "$PROFILE_TEMP" <<EOF
+# BEGIN ORACLE DATABASE SETTINGS
+export ORACLE_SID="$ORACLE_SID"
+DB_NAME="\$ORACLE_SID"
+DB_UNIQUE_NAME="\$ORACLE_SID"
+# END ORACLE DATABASE SETTINGS
+EOF
+then
+    exit 1
+fi
+if ! bash -n "$PROFILE_TEMP"; then
+    echo "ERROR: Updated profile failed syntax validation; original retained."
+    exit 1
+fi
+if cmp -s "$PROFILE_INPUT" "$PROFILE_TEMP"; then
+    echo "Host profile is already configured; skipping update."
+else
+    if [ -f "$HOST_PROFILE" ]; then
+        if [ ! -e "$HOST_PROFILE.pre_db.bak" ]; then
+            if ! cp -p "$HOST_PROFILE" "$HOST_PROFILE.pre_db.bak"; then
+                exit 1
+            fi
+        fi
+        if ! chmod --reference="$HOST_PROFILE" "$PROFILE_TEMP"; then
+            exit 1
+        fi
+    fi
+    if ! mv "$PROFILE_TEMP" "$HOST_PROFILE"; then
+        exit 1
+    fi
+    echo "Updated host profile: $HOST_PROFILE"
+fi
+echo "All steps completed. Profile settings apply to future logins."
+ORACLE_DATABASE_SCRIPT
+    DB_WORKER_PID=$!
+    wait "$DB_WORKER_PID"
+    DB_RESULT=$?
+    DB_WORKER_PID=""
+    if [ "$DB_RESULT" -ne 0 ]; then
+        echo "ERROR: Database stage failed with status $DB_RESULT. Review the stage output before continuing manually."
+        exit "$DB_RESULT"
+    fi
+    if ! rm -f -- "$DB_SECRET_DIR/dbca.rsp" "$DB_SECRET_DIR/connect.sql" ||
+       ! rmdir -- "$DB_SECRET_DIR"; then
+        echo "ERROR: Could not remove database credential files."
+        exit 1
+    fi
+    DB_SECRET_DIR=""
+    echo "Database and profile configuration completed. Review Listener READY status in the output."
+fi
+CURRENT_STAGE="completed"
+
 echo "========================================"
 echo " Completed"
 echo "========================================"
@@ -1158,6 +1748,11 @@ else
     echo "Oracle user password was preserved."
 fi
 echo "Oracle 19c Home: $ORACLE_HOME"
+if [ "$CREATE_DB" -eq 1 ]; then
+    echo "Database: $ORACLE_SID; Listener: LSNR_$ORACLE_SID:$LISTENER_PORT"
+else
+    echo "Software-only mode completed. No database was created."
+fi
 echo "Oracle Database 19c installer success and Inventory registration were verified."
 echo "Reboot is required to fully disable SELinux."
 echo "New oracle Bash terminals load ~/.oracle_env automatically."

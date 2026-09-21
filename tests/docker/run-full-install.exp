@@ -1,0 +1,34 @@
+#!/usr/bin/expect -f
+# Run the unchanged installer in a disposable container using a real terminal.
+set timeout 1200
+set env(TERM) xterm
+set source [open /dev/urandom r]
+fconfigure $source -translation binary
+binary scan [read $source 12] H* random
+close $source
+set password "Lab${random}_9a"
+set mode [lindex $argv 0]
+if {$mode ni {software database}} { error "Use software or database" }
+log_user 0
+log_file -a /tmp/full-install-$mode.log
+file attributes /tmp/full-install-$mode.log -permissions 0600
+if {$mode eq "database"} {
+    spawn -noecho bash /workspace/oracle_linux_7_8_19c_full_install.sh --create-db
+} else {
+    spawn -noecho bash /workspace/oracle_linux_7_8_19c_full_install.sh
+}
+expect {
+    -re {Enter the oracle OS account password:} { after 150; send -- "$password\r"; exp_continue }
+    -re {Confirm the oracle OS account password:} { after 150; send -- "$password\r"; exp_continue }
+    -re {Enter SID \(} { after 150; send -- "DCKTEST\r"; exp_continue }
+    -re {Enter Listener TCP port} { after 150; send -- "\r"; exp_continue }
+    -re {Enter the shared SYS/SYSTEM password} { after 150; send -- "$password\r"; exp_continue }
+    -re {Confirm the shared SYS/SYSTEM password:} { after 150; send -- "$password\r"; exp_continue }
+    timeout { puts "Full installer timed out."; exit 124 }
+    eof {
+        set result [wait]
+        set status [lindex $result 3]
+        puts "Full installer ($mode) exit status: $status"
+        exit $status
+    }
+}
