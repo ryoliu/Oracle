@@ -12,8 +12,6 @@ unset ORACLE_PASSWORD DB_PASSWORD PASSWORD_CONFIRM DB_PASSWORD_RSP
 # This script does not apply an RU or verify OS/kernel/Oracle certification.
 
 PACKAGE_NAME="oracle-database-preinstall-19c"
-PREINSTALL_SYSCTL="/etc/sysctl.d/99-oracle-database-preinstall-19c-sysctl.conf"
-CUSTOM_SYSCTL="/etc/sysctl.d/99-oracle-custom.conf"
 LIMITS_FILE="/etc/security/limits.d/oracle-database-preinstall-19c.conf"
 SELINUX_CONFIG="/etc/selinux/config"
 TIMEZONE="Asia/Taipei"
@@ -34,7 +32,7 @@ TOTAL_MEMORY_MB=2048
 FRA_SIZE_MB=10240
 CHARACTER_SET="AL32UTF8"
 NATIONAL_CHARACTER_SET="AL16UTF16"
-LISTENER_PORT=1522
+LISTENER_PORT=1521
 DB_SERVICE=""
 DB_HOST="$(hostname -f 2>/dev/null)"
 LOCAL_BIN_DIR="/usr/local/bin"
@@ -139,19 +137,19 @@ if [ ! -t 0 ] || [ ! -t 1 ]; then
     echo "ERROR: Run this script in an interactive terminal."
     exit 1
 fi
-if [ "$ORACLE_USER_EXISTED_BEFORE_PREINSTALL" -eq 0 ] ||
-   [ "$PASSWORD_RESET_REQUESTED" -eq 1 ] || [ "$CREATE_DB" -eq 1 ]; then
-    if ! command -v dialog >/dev/null 2>&1; then
-        echo "ERROR: Install dialog before running this script."
-        exit 1
-    fi
-fi
 if [ "$ORACLE_USER_EXISTED_BEFORE_PREINSTALL" -eq 0 ] || [ "$PASSWORD_RESET_REQUESTED" -eq 1 ]; then
-    if ! ORACLE_PASSWORD=$(dialog --stdout --title "Oracle OS Account" --passwordbox "Enter the oracle OS account password:" 10 72) ||
-       ! PASSWORD_CONFIRM=$(dialog --stdout --title "Oracle OS Account" --passwordbox "Confirm the oracle OS account password:" 10 72); then
+    if ! IFS= read -r -s -p "Enter the oracle OS account password: " ORACLE_PASSWORD; then
+        printf '\n'
         echo "Cancelled before system changes."
         exit 1
     fi
+    printf '\n'
+    if ! IFS= read -r -s -p "Confirm the oracle OS account password: " PASSWORD_CONFIRM; then
+        printf '\n'
+        echo "Cancelled before system changes."
+        exit 1
+    fi
+    printf '\n'
     if [ -z "$ORACLE_PASSWORD" ] || [ "$ORACLE_PASSWORD" != "$PASSWORD_CONFIRM" ] ||
        [[ "$ORACLE_PASSWORD" == *$'\n'* || "$ORACLE_PASSWORD" == *$'\r'* ]]; then
         echo "ERROR: OS passwords must match, be nonempty and contain no line breaks."
@@ -160,11 +158,18 @@ if [ "$ORACLE_USER_EXISTED_BEFORE_PREINSTALL" -eq 0 ] || [ "$PASSWORD_RESET_REQU
     unset PASSWORD_CONFIRM
 fi
 if [ "$CREATE_DB" -eq 1 ]; then
-    if ! ORACLE_SID=$(dialog --stdout --title "Create Database" --inputbox "Enter SID (1-8 uppercase letters or digits, starting with a letter):" 10 76) ||
-       ! LISTENER_PORT=$(dialog --stdout --title "Create Database" --inputbox "Enter Listener TCP port (1024-65535):" 10 72 "$LISTENER_PORT"); then
+    if ! IFS= read -r -p "Enter SID (1-8 uppercase letters or digits, starting with a letter): " ORACLE_SID; then
         echo "Cancelled before system changes."
         exit 1
     fi
+    if ! IFS= read -r -p "Enter Listener TCP port (1024-65535) [$LISTENER_PORT]: " LISTENER_PORT_INPUT; then
+        echo "Cancelled before system changes."
+        exit 1
+    fi
+    if [ -n "$LISTENER_PORT_INPUT" ]; then
+        LISTENER_PORT="$LISTENER_PORT_INPUT"
+    fi
+    unset LISTENER_PORT_INPUT
     if [[ ! "$ORACLE_SID" =~ ^[A-Z][A-Z0-9]{0,7}$ ]] ||
        [[ ! "$LISTENER_PORT" =~ ^[1-9][0-9]{3,4}$ ]] ||
        [ "$LISTENER_PORT" -lt 1024 ] || [ "$LISTENER_PORT" -gt 65535 ]; then
@@ -185,11 +190,18 @@ if [ "$CREATE_DB" -eq 1 ]; then
             exit 1
         fi
     done
-    if ! DB_PASSWORD=$(dialog --stdout --title "Database Password" --passwordbox "Enter the shared SYS/SYSTEM password (no double quotes or control characters):" 10 78) ||
-       ! PASSWORD_CONFIRM=$(dialog --stdout --title "Database Password" --passwordbox "Confirm the shared SYS/SYSTEM password:" 10 72); then
+    if ! IFS= read -r -s -p "Enter the shared SYS/SYSTEM password (no double quotes or control characters): " DB_PASSWORD; then
+        printf '\n'
         echo "Cancelled before system changes."
         exit 1
     fi
+    printf '\n'
+    if ! IFS= read -r -s -p "Confirm the shared SYS/SYSTEM password: " PASSWORD_CONFIRM; then
+        printf '\n'
+        echo "Cancelled before system changes."
+        exit 1
+    fi
+    printf '\n'
     if [ -z "$DB_PASSWORD" ] || [ "$DB_PASSWORD" != "$PASSWORD_CONFIRM" ] ||
        [[ "$DB_PASSWORD" == *'"'* || "$DB_PASSWORD" =~ [[:cntrl:]] ]]; then
         echo "ERROR: DB passwords must match, be nonempty and contain no double quotes or control characters."
@@ -212,26 +224,6 @@ fi
 CURRENT_STAGE="software installation"
 # BEGIN SOFTWARE INSTALLATION
 
-if [ -f /etc/oracle-release ]; then
-    cat /etc/oracle-release
-else
-    cat /etc/os-release
-fi
-
-echo ""
-echo "--- Kernel ---"
-uname -r
-
-echo ""
-echo "--- Architecture ---"
-uname -m
-
-echo ""
-echo "--- Hostname ---"
-hostname
-hostname -f 2>/dev/null || echo "WARNING: Unable to resolve FQDN."
-
-echo ""
 # Check existing Inventory without changing ownership or permissions.
 INVENTORY_GROUP="$ORACLE_GROUP"
 if [ -f "$ORAINST_FILE" ]; then
@@ -332,45 +324,7 @@ else
 fi
 
 echo ""
-echo "=== 3. Check Oracle Preinstall Sysctl ==="
-
-if [ -f "$PREINSTALL_SYSCTL" ]; then
-    echo "Oracle 19c preinstall sysctl file exists."
-    echo "$PREINSTALL_SYSCTL"
-else
-    echo "WARNING: Oracle 19c preinstall sysctl file not found."
-    echo "Please check whether oracle-database-preinstall-19c is installed."
-fi
-
-echo ""
-echo "=== 4. Check Preinstall Parameters ==="
-
-if [ -f "$PREINSTALL_SYSCTL" ]; then
-    cat "$PREINSTALL_SYSCTL"
-fi
-
-echo ""
-echo "=== 5. Configure Additional Parameters ==="
-
-# Add additional kernel parameters here if required.
-#
-# Example:
-#
-# echo "vm.nr_hugepages = 4096" > "$CUSTOM_SYSCTL"
-#
-# IMPORTANT:
-# vm.nr_hugepages must be calculated according to Oracle SGA size.
-# Do not use a fixed value for every database server.
-
-if [ -f "$CUSTOM_SYSCTL" ]; then
-    echo "Custom sysctl file exists:"
-    cat "$CUSTOM_SYSCTL"
-else
-    echo "No additional kernel parameters configured."
-fi
-
-echo ""
-echo "=== 6. Apply Kernel Parameters ==="
+echo "=== 3. Apply Kernel Parameters ==="
 
 echo "Oracle sysctl files that will be applied:"
 
@@ -399,7 +353,7 @@ if [ $? -ne 0 ]; then
 fi
 
 echo ""
-echo "=== 7. Check Current Kernel Parameters ==="
+echo "=== 4. Check Current Kernel Parameters ==="
 
 echo ""
 echo "fs.aio-max-nr:"
@@ -426,14 +380,7 @@ echo "vm.nr_hugepages:"
 sysctl vm.nr_hugepages
 
 echo ""
-echo "=== 8. Check Oracle User and Groups ==="
-
-id oracle
-getent group oinstall
-getent group dba
-
-echo ""
-echo "=== 9. Create Oracle Directories ==="
+echo "=== 5. Check Oracle User, Groups, and Directories ==="
 
 if ! id "$ORACLE_OWNER" >/dev/null 2>&1; then
     echo "ERROR: User does not exist: $ORACLE_OWNER"
@@ -544,24 +491,18 @@ echo "Directory is ready: $ORA_INVENTORY"
 echo "Oracle directories were configured successfully."
 
 echo ""
-echo "=== 10. Check Preinstall Limits File ==="
+echo "=== 6. Check Preinstall Limits Settings ==="
 
 if [ -f "$LIMITS_FILE" ]; then
     echo "Limits file exists:"
     echo "$LIMITS_FILE"
+    grep -v "^#" "$LIMITS_FILE" | grep -v "^$"
 else
     echo "WARNING: Oracle 19c limits file not found."
 fi
 
 echo ""
-echo "=== 11. Show Oracle Limits Settings ==="
-
-if [ -f "$LIMITS_FILE" ]; then
-    grep -v "^#" "$LIMITS_FILE" | grep -v "^$"
-fi
-
-echo ""
-echo "=== 12. Check Oracle User Current Limits ==="
+echo "=== 7. Check Oracle User Current Limits ==="
 
 echo "Open files soft limit:"
 su - oracle -c "ulimit -Sn"
@@ -588,26 +529,7 @@ echo "Locked memory hard limit:"
 su - oracle -c "ulimit -Hl"
 
 echo ""
-echo "=== 13. Check Memory / Swap / tmp / shm ==="
-
-echo ""
-echo "--- Memory ---"
-free -h
-
-echo ""
-echo "--- Swap ---"
-grep -E "^SwapTotal:" /proc/meminfo
-
-echo ""
-echo "--- /tmp ---"
-df -h /tmp
-
-echo ""
-echo "--- /dev/shm ---"
-df -h /dev/shm
-
-echo ""
-echo "=== 14. Check Transparent HugePages ==="
+echo "=== 8. Check Transparent HugePages ==="
 
 if [ -f /sys/kernel/mm/transparent_hugepage/enabled ]; then
     cat /sys/kernel/mm/transparent_hugepage/enabled
@@ -616,7 +538,7 @@ else
 fi
 
 echo ""
-echo "=== 15. Disable SELinux ==="
+echo "=== 9. Disable SELinux ==="
 
 if [ ! -f "$SELINUX_CONFIG" ]; then
     echo "ERROR: SELinux configuration file was not found: $SELINUX_CONFIG"
@@ -662,7 +584,7 @@ else
 fi
 
 echo ""
-echo "=== 16. Disable firewalld ==="
+echo "=== 10. Disable firewalld ==="
 
 if ! CURRENT_SELINUX="$(getenforce)" ||
    { [ "$CURRENT_SELINUX" != "Permissive" ] && [ "$CURRENT_SELINUX" != "Disabled" ]; }; then
@@ -693,7 +615,7 @@ else
 fi
 
 echo ""
-echo "=== 17. Disable iptables ==="
+echo "=== 11. Disable iptables ==="
 
 if printf '%s\n' "$SERVICE_UNITS" | grep -q "^iptables\.service[[:space:]]"; then
     if ! systemctl stop iptables || ! systemctl disable iptables; then
@@ -713,7 +635,7 @@ else
 fi
 
 echo ""
-echo "=== 18. Check timezone ==="
+echo "=== 12. Check timezone ==="
 
 get_current_timezone() {
     CURRENT_TIMEZONE=""
@@ -759,7 +681,7 @@ if ! get_current_timezone ||
     exit 1
 fi
 
-echo "=== 19. Configure Oracle User Profile ==="
+echo "=== 13. Configure Oracle User Profile ==="
 
 echo "Switching to oracle user to configure shell startup files..."
 
@@ -786,9 +708,15 @@ for TARGET_FILE in "$ALIAS_FILE" "$PROFILE_FILE" "$ENV_FILE" "$BASHRC_FILE"; do
         echo "ERROR: Review symbolic link or non-regular profile path: $TARGET_FILE"
         exit 1
     fi
+    if [ -f "$TARGET_FILE" ] && [ ! -e "$TARGET_FILE.pre_oracle_install.bak" ]; then
+        if ! cp -p "$TARGET_FILE" "$TARGET_FILE.pre_oracle_install.bak"; then
+            echo "ERROR: Failed to preserve the original profile file: $TARGET_FILE"
+            exit 1
+        fi
+    fi
 done
 
-# This script manages the alias, environment, and login profile contents.
+# These four files use the fixed project standard on every run.
 if ! cat > "$ALIAS_FILE" <<'EOF'
 alias ORADATA="ls -lur /oradata/*_*/*/data/*.dbf"
 alias ORAPS="ps -ef | grep -iv 'grep' | egrep -i -n 'smon|lsnr'; df -h | grep -i /ora"
@@ -851,48 +779,17 @@ then
     exit 1
 fi
 
-# Prepend the managed block so existing return/exit statements cannot bypass it.
-if ! PROFILE_STAGE_DIR="$(mktemp -d)"; then
-    echo "ERROR: Failed to create temporary shell configuration directory."
-    exit 1
-fi
-trap 'rm -rf -- "$PROFILE_STAGE_DIR"' EXIT
-
-if ! cat > "$PROFILE_STAGE_DIR/header" <<'EOF'
-# BEGIN ORACLE ENVIRONMENT
+if ! cat > "$BASHRC_FILE" <<'EOF'
 if [ "${ORACLE_ENV_LOADING:-0}" = "1" ]; then
     return
 fi
 if [ -f "$HOME/.oracle_env" ]; then
     . "$HOME/.oracle_env"
 fi
-# END ORACLE ENVIRONMENT
 EOF
 then
-    echo "ERROR: Failed to prepare the .bashrc loading block."
+    echo "ERROR: Failed to write $BASHRC_FILE"
     exit 1
-fi
-
-if [ -f "$BASHRC_FILE" ] &&
-   head -n 8 "$BASHRC_FILE" | cmp -s "$PROFILE_STAGE_DIR/header" -; then
-    echo "Oracle environment loading block is already configured."
-else
-    if [ -f "$BASHRC_FILE" ] && grep -Fq '# BEGIN ORACLE ENVIRONMENT' "$BASHRC_FILE"; then
-        echo "ERROR: Existing Oracle loading block was modified or moved. Review $BASHRC_FILE"
-        exit 1
-    fi
-    if ! cp "$PROFILE_STAGE_DIR/header" "$PROFILE_STAGE_DIR/bashrc"; then
-        echo "ERROR: Failed to prepare .bashrc."
-        exit 1
-    fi
-    if [ -f "$BASHRC_FILE" ] && ! cat "$BASHRC_FILE" >> "$PROFILE_STAGE_DIR/bashrc"; then
-        echo "ERROR: Failed to preserve existing .bashrc content."
-        exit 1
-    fi
-    if ! cat "$PROFILE_STAGE_DIR/bashrc" > "$BASHRC_FILE"; then
-        echo "ERROR: Failed to write $BASHRC_FILE"
-        exit 1
-    fi
 fi
 
 if ! bash -n "$ENV_FILE" || ! bash -n "$PROFILE_FILE" ||
@@ -913,7 +810,7 @@ fi
 echo "Oracle shell startup configuration completed."
 
 echo ""
-echo "=== 20. Extract Oracle 19c Database Home ==="
+echo "=== 14. Extract Oracle 19c Database Home ==="
 
 # The marker records successful extraction only, not installation or file integrity.
 if [ "$INSTALL_REQUIRED" = "N" ]; then
@@ -1011,7 +908,7 @@ fi
 echo "Installer path: $ORACLE_HOME/runInstaller"
 
 echo ""
-echo "=== 21. Install Oracle Database 19c software ==="
+echo "=== 15. Install Oracle Database 19c software ==="
 
 if [ ! -f "$ORACLE_HOME/runInstaller" ]; then
     echo "ERROR: runInstaller was not found: $ORACLE_HOME/runInstaller"
@@ -1122,7 +1019,7 @@ if [ "$INSTALL_REQUIRED" = "Y" ]; then
 fi
 
 echo ""
-echo "=== 22. Run orainstRoot.sh ==="
+echo "=== 16. Run orainstRoot.sh ==="
 
 if [ ! -f "$ORA_INVENTORY/orainstRoot.sh" ]; then
     echo "ERROR: orainstRoot.sh was not found:"
@@ -1139,7 +1036,7 @@ echo "orainstRoot.sh completed successfully."
 
 
 echo ""
-echo "=== 23. Run root.sh ==="
+echo "=== 17. Run root.sh ==="
 
 if [ ! -f "$ORACLE_HOME/root.sh" ]; then
     echo "ERROR: root.sh was not found:"
@@ -1164,96 +1061,22 @@ echo "root.sh completed successfully."
 
 echo ""
 echo "========================================"
-echo " Final Status"
+echo " Software Installation Status"
 echo "========================================"
 
-echo ""
-echo "--- Oracle 19c preinstall package ---"
-rpm -q "$PACKAGE_NAME"
-
-echo ""
-echo "--- Kernel Parameters ---"
-sysctl fs.aio-max-nr
-sysctl fs.file-max
-sysctl kernel.sem
-sysctl kernel.shmmax
-sysctl kernel.shmall
-sysctl vm.nr_hugepages
-
-echo ""
-echo "--- Oracle User and Groups ---"
-id oracle
-getent group oinstall
-getent group dba
-
-echo ""
-echo "--- Oracle Directories ---"
-ls -ld "$SOFTWARE_SOURCE_DIR"
-ls -ld "$ORACLE_BASE"
-ls -ld "$ORACLE_HOME"
-ls -ld "$ORA_INVENTORY"
-
-echo ""
-echo "--- Oracle Software Installation ---"
 echo "Oracle Home: $ORACLE_HOME"
 echo "Inventory: $ORA_INVENTORY"
-if [ -f "$INVENTORY_FILE" ] &&
-   grep -Fq "LOC=\"$ORACLE_HOME\"" "$INVENTORY_FILE"; then
-    echo "Oracle Database 19c software is registered in Inventory."
-else
-    echo "WARNING: Oracle Database 19c software is not registered in Inventory."
+if [ ! -s "$INSTALL_MARKER" ]; then
+    echo "ERROR: Installer completion marker is missing or empty: $INSTALL_MARKER"
+    exit 1
 fi
-
-echo ""
-echo "--- OS / Kernel / Architecture / Hostname ---"
-if [ -f /etc/oracle-release ]; then
-    cat /etc/oracle-release
-else
-    cat /etc/os-release
+if [ ! -f "$INVENTORY_FILE" ] ||
+   ! grep -Fq "LOC=\"$ORACLE_HOME\"" "$INVENTORY_FILE"; then
+    echo "ERROR: Oracle Home is not registered in Inventory."
+    exit 1
 fi
-uname -r
-uname -m
-hostname
-hostname -f 2>/dev/null || true
-
-echo ""
-echo "--- Memory / Swap / tmp / shm ---"
-free -h
-grep -E "^SwapTotal:" /proc/meminfo
-df -h /tmp
-df -h /dev/shm
-
-echo ""
-echo "--- Transparent HugePages ---"
-if [ -f /sys/kernel/mm/transparent_hugepage/enabled ]; then
-    cat /sys/kernel/mm/transparent_hugepage/enabled
-fi
-
-echo ""
-echo "--- SELinux ---"
-sestatus
-grep "^SELINUX=" "$SELINUX_CONFIG"
-
-echo ""
-echo "--- firewalld ---"
-systemctl is-active firewalld 2>/dev/null
-systemctl is-enabled firewalld 2>/dev/null
-
-echo ""
-echo "--- iptables ---"
-systemctl is-active iptables 2>/dev/null
-systemctl is-enabled iptables 2>/dev/null
-
-echo ""
-echo "--- Timezone ---"
-timedatectl | grep -i "time zone"
-
-
-echo ""
-echo "--- Oracle Profile ---"
-echo "ORACLE_BASE=$ORACLE_BASE"
-echo "ORACLE_HOME=$ORACLE_HOME"
-su - oracle -c "cat ~/.bash_profile 2>/dev/null"
+echo "Installer marker: $INSTALL_MARKER"
+echo "Oracle Database 19c software is registered in Inventory."
 
 echo ""
 # END SOFTWARE INSTALLATION
@@ -1278,8 +1101,8 @@ if [ "$CREATE_DB" -eq 1 ]; then
         echo "ERROR: Cannot prepare the DBCA response file."
         exit 1
     fi
-    if ! printf 'SET ECHO OFF VERIFY OFF DEFINE OFF\nWHENEVER OSERROR EXIT FAILURE\nWHENEVER SQLERROR EXIT FAILURE\nCONNECT system/"%s"@%s\n' \
-        "$DB_PASSWORD" "$ORACLE_SID" > "$DB_SECRET_DIR/connect.sql"; then
+    if ! printf 'SET ECHO OFF VERIFY OFF DEFINE OFF\nWHENEVER OSERROR EXIT FAILURE\nWHENEVER SQLERROR EXIT FAILURE\nCONNECT system/"%s"@//%s:%s/%s\n' \
+        "$DB_PASSWORD" "$DB_HOST" "$LISTENER_PORT" "$DB_SERVICE" > "$DB_SECRET_DIR/connect.sql"; then
         echo "ERROR: Cannot prepare the SQL*Plus login file."
         exit 1
     fi
@@ -1318,7 +1141,7 @@ WORK_DIR=""
 PROFILE_TEMP=""
 cleanup_db_work() {
     if [ -n "$WORK_DIR" ]; then
-        rm -f -- "$WORK_DIR/netca.rsp" "$WORK_DIR/tnsnames.ora" "$WORK_DIR/verify.sql"
+        rm -f -- "$WORK_DIR/listener.ora" "$WORK_DIR/verify.sql"
         rmdir -- "$WORK_DIR"
     fi
     if [ -n "$PROFILE_TEMP" ]; then rm -f -- "$PROFILE_TEMP"; fi
@@ -1339,106 +1162,12 @@ if ! command -v ss >/dev/null 2>&1; then
     exit 1
 fi
 
-update_tns_alias() {
-    TNS_FILE="$TNS_ADMIN/tnsnames.ora"
-    TNS_INPUT="$TNS_FILE"
-    if [ ! -e "$TNS_FILE" ]; then
-        TNS_INPUT=/dev/null
-    fi
-    if [ -L "$TNS_FILE" ] || [ ! -r "$TNS_INPUT" ]; then
-        echo "ERROR: TNS file must be readable and must not be a symlink."
-        exit 1
-    fi
-    # Parse complete parenthesized entries, never replace arbitrary matching lines.
-    # Unsupported syntax is rejected without changing the original file.
-    if ! awk -v alias="$ORACLE_SID" -v host="$DB_HOST" -v port="$LISTENER_PORT" -v service="$DB_SERVICE" '
-    function compact(value) {
-        gsub(/[[:space:]]/, "", value)
-        value=toupper(value)
-        gsub(/\(SERVER=DEDICATED\)/, "", value)
-        # A single ADDRESS_LIST wrapper does not change the target endpoint.
-        sub(/\(ADDRESS_LIST=\(ADDRESS=/, "(ADDRESS=", value)
-        sub(/\)\)\)\(CONNECT_DATA=/, "))(CONNECT_DATA=", value)
-        return value
-    }
-    function fail() { bad=1; exit 1 }
-    function finish(    header, names, count, i, target) {
-        header=substr(clean,1,index(clean,"=")-1)
-        gsub(/[[:space:]]/, "", header)
-        if (header !~ /^[A-Za-z0-9_.-]+(,[A-Za-z0-9_.-]+)*$/) fail()
-        count=split(header,names,",")
-        for (i=1;i<=count;i++) if (toupper(names[i])==toupper(alias)) target=1
-        if (target) {
-            if (count!=1 || found++) fail()
-            if (compact(clean)==compact(desired)) output=output raw
-            else output=output desired "\n"
-        } else output=output raw
-        raw=""; clean=""; opened=0
-    }
-    BEGIN {
-        desired=alias " =\n  (DESCRIPTION =\n    (ADDRESS = (PROTOCOL = TCP)(HOST = " host ")(PORT = " port "))\n    (CONNECT_DATA = (SERVICE_NAME = " service "))\n  )"
-    }
-    {
-        line=$0
-        sub(/#.*/, "", line)
-        if (line ~ /["\047\\]/ || toupper(line) ~ /^[[:space:]]*IFILE[[:space:]]*=/) fail()
-        if (raw=="" && line ~ /^[[:space:]]*$/) { output=output $0 "\n"; next }
-        raw=raw $0 "\n"; clean=clean line "\n"
-        for (i=1;i<=length(line);i++) {
-            ch=substr(line,i,1)
-            if (ch=="(") { depth++; opened=1 }
-            if (ch==")") {
-                depth--
-                if (depth<0) fail()
-                if (depth==0 && substr(line,i+1) !~ /^[[:space:]]*$/) fail()
-            }
-        }
-        if (opened && depth==0) finish()
-    }
-    END {
-        if (bad || raw!="" || depth!=0) exit 1
-        if (!found) output=output "\n" desired "\n"
-        printf "%s", output
-    }' "$TNS_INPUT" > "$WORK_DIR/tnsnames.ora"; then
-        echo "ERROR: TNS update refused: malformed syntax, IFILE, quotes, escapes, duplicate alias or shared target alias."
-        echo "Review $TNS_FILE manually. The file was not changed by the updater."
-        exit 1
-    fi
-    if cmp -s "$TNS_INPUT" "$WORK_DIR/tnsnames.ora"; then
-        echo "DB connection alias is already configured; skipping update."
-    else
-        if [ -f "$TNS_FILE" ]; then
-            if [ ! -e "$TNS_FILE.pre_alias.bak" ]; then
-                if ! cp -p "$TNS_FILE" "$TNS_FILE.pre_alias.bak"; then
-                    exit 1
-                fi
-            fi
-            if ! chmod --reference="$TNS_FILE" "$WORK_DIR/tnsnames.ora"; then
-                exit 1
-            fi
-        else
-            if ! chmod 640 "$WORK_DIR/tnsnames.ora"; then
-                exit 1
-            fi
-        fi
-        if ! mv "$WORK_DIR/tnsnames.ora" "$TNS_FILE"; then
-            exit 1
-        fi
-        echo "DB connection alias updated; unrelated entries retained."
-    fi
-}
-
-for TOOL in netca dbca lsnrctl sqlplus tnsping; do
+for TOOL in dbca lsnrctl sqlplus; do
     if [ ! -x "$ORACLE_HOME/bin/$TOOL" ]; then
         echo "ERROR: Missing Oracle tool: $TOOL"
         exit 1
     fi
 done
-NETCA_TEMPLATE="$ORACLE_HOME/assistants/netca/netca.rsp"
-if [ ! -r "$NETCA_TEMPLATE" ]; then
-    echo "ERROR: Cannot read $NETCA_TEMPLATE"
-    exit 1
-fi
 if [ ! -r /etc/oratab ] || [ ! -r "$ORACLE_HOME/dbs" ]; then
     echo "ERROR: Check dbs permissions and /etc/oratab."
     exit 1
@@ -1534,12 +1263,12 @@ fi
 echo "Database: $DB_NAME; Listener: $LISTENER_NAME:$LISTENER_PORT"
 echo "DATA: $DATA_DIR/$DB_UNIQUE_NAME; FRA: $FRA_DIR/$DB_UNIQUE_NAME"
 
-echo "=== 2. Create and start Listener with NETCA ==="
+echo "=== 2. Create and start dedicated Listener ==="
 if ! mkdir -p "$TNS_ADMIN"; then
     exit 1
 fi
-# Preserve the first backup before either assistant changes network settings.
-for CONFIG_FILE in listener.ora sqlnet.ora tnsnames.ora; do
+# Preserve the first backup before changing network settings.
+for CONFIG_FILE in listener.ora sqlnet.ora; do
     if [ -f "$TNS_ADMIN/$CONFIG_FILE" ] && [ ! -e "$TNS_ADMIN/$CONFIG_FILE.pre_create.bak" ]; then
         if ! cp -p "$TNS_ADMIN/$CONFIG_FILE" "$TNS_ADMIN/$CONFIG_FILE.pre_create.bak"; then
             exit 1
@@ -1549,30 +1278,30 @@ done
 if ! WORK_DIR=$(mktemp -d "$TNS_ADMIN/.create_db.XXXXXX"); then
     exit 1
 fi
-# Use the installed response template so its version and sections remain intact.
-for KEY in LISTENER_NUMBER LISTENER_NAMES LISTENER_PROTOCOLS LISTENER_START; do
-    if ! grep -Eq "^[[:space:]]*$KEY[[:space:]]*=" "$NETCA_TEMPLATE"; then
-        echo "ERROR: Missing NETCA template setting: $KEY"
+if [ -f "$LISTENER_FILE" ]; then
+    if ! cp -p "$LISTENER_FILE" "$WORK_DIR/listener.ora"; then
         exit 1
     fi
-done
-if ! sed -e "s/^[[:space:]]*LISTENER_NUMBER[[:space:]]*=.*/LISTENER_NUMBER=1/" \
-    -e "s/^[[:space:]]*LISTENER_NAMES[[:space:]]*=.*/LISTENER_NAMES={\"$LISTENER_NAME\"}/" \
-    -e "s/^[[:space:]]*LISTENER_PROTOCOLS[[:space:]]*=.*/LISTENER_PROTOCOLS={\"TCP;$LISTENER_PORT\"}/" \
-    -e "s/^[[:space:]]*LISTENER_START[[:space:]]*=.*/LISTENER_START=\"$LISTENER_NAME\"/" \
-    -e '/^[[:space:]]*NSN_NUMBER[[:space:]]*=/d' \
-    -e '/^[[:space:]]*\[oracle.net.ca\][[:space:]]*$/a NSN_NUMBER=0' \
-    "$NETCA_TEMPLATE" > "$WORK_DIR/netca.rsp"; then exit 1; fi
-if ! grep -q '^NSN_NUMBER=0$' "$WORK_DIR/netca.rsp"; then
-    echo "ERROR: Missing NETCA response section."
+else
+    if ! : > "$WORK_DIR/listener.ora" || ! chmod 640 "$WORK_DIR/listener.ora"; then
+        exit 1
+    fi
+fi
+if ! printf '\n%s =\n  (DESCRIPTION_LIST =\n    (DESCRIPTION =\n      (ADDRESS = (PROTOCOL = TCP)(HOST = %s)(PORT = %s))\n    )\n  )\n' \
+    "$LISTENER_NAME" "$DB_HOST" "$LISTENER_PORT" >> "$WORK_DIR/listener.ora"; then
+    echo "ERROR: Cannot prepare the dedicated Listener configuration."
     exit 1
 fi
-if ! "$ORACLE_HOME/bin/netca" -silent -responsefile "$WORK_DIR/netca.rsp" </dev/null; then
-    echo "ERROR: NETCA failed. Review its log and retained configuration before retrying."
+if ! mv "$WORK_DIR/listener.ora" "$LISTENER_FILE"; then
+    echo "ERROR: Cannot install the dedicated Listener configuration."
+    exit 1
+fi
+if ! "$ORACLE_HOME/bin/lsnrctl" start "$LISTENER_NAME"; then
+    echo "ERROR: Failed to start the target Listener. Review $LISTENER_FILE before retrying."
     exit 1
 fi
 if ! LISTENER_STATUS=$("$ORACLE_HOME/bin/lsnrctl" status "$LISTENER_NAME"); then
-    echo "ERROR: NETCA did not start the target Listener."
+    echo "ERROR: The target Listener did not remain available after startup."
     exit 1
 fi
 printf '%s\n' "$LISTENER_STATUS"
@@ -1617,14 +1346,10 @@ then
     exit 1
 fi
 
-echo "=== 6. Create or update the DB connection alias ==="
-update_tns_alias
-
-echo "=== 7. Verify Listener and client connectivity ==="
+echo "=== 6. Verify Listener and client connectivity ==="
 if ! "$ORACLE_HOME/bin/lsnrctl" status "$LISTENER_NAME" ||
-   ! "$ORACLE_HOME/bin/lsnrctl" services "$LISTENER_NAME" ||
-   ! "$ORACLE_HOME/bin/tnsping" "$ORACLE_SID"; then
-    echo "ERROR: Listener or TNS verification failed."
+   ! "$ORACLE_HOME/bin/lsnrctl" services "$LISTENER_NAME"; then
+    echo "ERROR: Listener verification failed."
     exit 1
 fi
 echo "Review the service listing above: the target instance should have READY status."
@@ -1655,6 +1380,7 @@ if ! "$ORACLE_HOME/bin/sqlplus" -L -s /nolog "@$WORK_DIR/verify.sql" </dev/null;
     exit 1
 fi
 echo "Database creation and verification completed successfully."
+echo "Configure $TNS_ADMIN/tnsnames.ora manually if a local TNS alias is required."
 
 echo "=== Save database settings in the host profile ==="
 PROFILE_INPUT="$HOST_PROFILE"
@@ -1750,6 +1476,8 @@ fi
 echo "Oracle 19c Home: $ORACLE_HOME"
 if [ "$CREATE_DB" -eq 1 ]; then
     echo "Database: $ORACLE_SID; Listener: LSNR_$ORACLE_SID:$LISTENER_PORT"
+    echo "Database, Listener, and SQL*Plus Easy Connect verification completed."
+    echo "tnsnames.ora requires manual configuration."
 else
     echo "Software-only mode completed. No database was created."
 fi
