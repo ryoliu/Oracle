@@ -1199,46 +1199,151 @@ export LD_LIBRARY_PATH="$ORACLE_HOME/lib"
 export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 
 echo "=== Preflight: Check target database and files ==="
+LISTENER_MARKER="$TNS_ADMIN/.LSNR_${ORACLE_SID}_complete"
+DATABASE_MARKER="$ORACLE_BASE/.DB_${ORACLE_SID}_complete"
+LISTENER_REQUIRED="Y"
+DATABASE_REQUIRED="Y"
+
+for COMPLETION_MARKER in "$LISTENER_MARKER" "$DATABASE_MARKER"; do
+    if [ -L "$COMPLETION_MARKER" ] ||
+       { [ -e "$COMPLETION_MARKER" ] && [ ! -f "$COMPLETION_MARKER" ]; }; then
+        echo "ERROR: Completion marker must be a regular file: $COMPLETION_MARKER"
+        exit 1
+    fi
+done
+
 if ! REGISTERED_DB=$(awk -F: -v name="$DB_NAME" '$0 !~ /^[[:space:]]*#/ && toupper($1)==name {print}' /etc/oratab); then
     exit 1
 fi
 if ! PROCESSES=$(ps -eo args=); then
     exit 1
 fi
-if [ -n "$REGISTERED_DB" ] || printf '%s\n' "$PROCESSES" | grep -Eiq "^ora_pmon_$ORACLE_SID([[:space:]]|$)"; then
-    echo "ERROR: Target DB already exists. Other names may remain; this target will not be recreated."
-    exit 1
-fi
 if ! DB_FILES=$(find "$ORACLE_HOME/dbs" -maxdepth 1 \( -iname "spfile$ORACLE_SID.ora" -o -iname "init$ORACLE_SID.ora" -o -iname "orapw$ORACLE_SID" -o -iname "lk$ORACLE_SID" \) -print); then
     exit 1
 fi
-if [ -n "$DB_FILES" ]; then
-    echo "ERROR: Target DB files exist: $DB_FILES"
-    exit 1
-fi
-for ROOT_DIR in "$DATA_DIR" "$FRA_DIR"; do
-    if [[ "$ROOT_DIR" != /* ]] || [ "$ROOT_DIR" = / ] || [ -L "$ROOT_DIR/$DB_UNIQUE_NAME" ]; then
-        echo "ERROR: Use an absolute storage root and no symlink for the target DB directory."
+
+if [ -f "$DATABASE_MARKER" ]; then
+    if [ -z "$REGISTERED_DB" ]; then
+        echo "ERROR: Database marker exists, but /etc/oratab has no target database entry."
         exit 1
     fi
-    if [ -e "$ROOT_DIR" ]; then
-        if [ ! -d "$ROOT_DIR" ] || [ ! -r "$ROOT_DIR" ] || [ ! -x "$ROOT_DIR" ]; then
-            echo "ERROR: Cannot inspect $ROOT_DIR"
-            exit 1
-        fi
-        if ! DB_FILES=$(find "$ROOT_DIR" -mindepth 1 -maxdepth 1 -iname "$DB_UNIQUE_NAME" -print); then
-            exit 1
-        fi
-        if [ -n "$DB_FILES" ]; then
-            echo "ERROR: Target DB directory already exists: $DB_FILES"
+
+    REGISTERED_COUNT=$(printf '%s\n' "$REGISTERED_DB" | awk 'NF {count++} END {print count + 0}')
+    REGISTERED_HOME=$(printf '%s\n' "$REGISTERED_DB" | awk -F: 'NF {print $2; exit}')
+    if [ "$REGISTERED_COUNT" -ne 1 ] || [ "$REGISTERED_HOME" != "$ORACLE_HOME" ]; then
+        echo "ERROR: Database marker and /etc/oratab are inconsistent for $DB_NAME."
+        exit 1
+    fi
+    if [ ! -f "$ORACLE_HOME/dbs/spfile$ORACLE_SID.ora" ]; then
+        echo "ERROR: Database marker exists, but the target spfile is missing."
+        exit 1
+    fi
+
+    if ! printf '%s\n' "$PROCESSES" | grep -Eiq "^ora_pmon_$ORACLE_SID([[:space:]]|$)"; then
+        echo "Target database is stopped. Starting the completed database for verification."
+        if ! "$ORACLE_HOME/bin/sqlplus" -L -s / as sysdba <<'SQL'
+WHENEVER OSERROR EXIT FAILURE
+WHENEVER SQLERROR EXIT FAILURE
+STARTUP;
+EXIT SUCCESS
+SQL
+        then
+            echo "ERROR: Database marker exists, but the target database could not be started."
             exit 1
         fi
     fi
-done
+
+    if ! DATABASE_STATUS=$("$ORACLE_HOME/bin/sqlplus" -L -s / as sysdba <<'SQL'
+WHENEVER OSERROR EXIT FAILURE
+WHENEVER SQLERROR EXIT FAILURE
+SET HEADING OFF FEEDBACK OFF PAGES 0 VERIFY OFF ECHO OFF
+SELECT name || ':' || open_mode FROM v$database;
+EXIT SUCCESS
+SQL
+    ); then
+        echo "ERROR: Database marker exists, but the target database is not available."
+        exit 1
+    fi
+    if ! printf '%s\n' "$DATABASE_STATUS" | grep -Eq "^[[:space:]]*$DB_NAME:READ WRITE[[:space:]]*$"; then
+        echo "ERROR: Database marker exists, but the database identity or open mode is inconsistent."
+        exit 1
+    fi
+
+    DATABASE_REQUIRED="N"
+    echo "Database already completed and verified. Skip DBCA."
+else
+    if [ -n "$REGISTERED_DB" ] ||
+       printf '%s\n' "$PROCESSES" | grep -Eiq "^ora_pmon_$ORACLE_SID([[:space:]]|$)"; then
+        echo "ERROR: Target database exists without its completion marker. Review it before retrying."
+        exit 1
+    fi
+    if [ -n "$DB_FILES" ]; then
+        echo "ERROR: Target database files exist without its completion marker: $DB_FILES"
+        exit 1
+    fi
+
+    for ROOT_DIR in "$DATA_DIR" "$FRA_DIR"; do
+        if [[ "$ROOT_DIR" != /* ]] || [ "$ROOT_DIR" = / ] || [ -L "$ROOT_DIR/$DB_UNIQUE_NAME" ]; then
+            echo "ERROR: Use an absolute storage root and no symlink for the target database directory."
+            exit 1
+        fi
+        if [ -e "$ROOT_DIR" ]; then
+            if [ ! -d "$ROOT_DIR" ] || [ ! -r "$ROOT_DIR" ] || [ ! -x "$ROOT_DIR" ]; then
+                echo "ERROR: Cannot inspect $ROOT_DIR"
+                exit 1
+            fi
+            if ! DB_FILES=$(find "$ROOT_DIR" -mindepth 1 -maxdepth 1 -iname "$DB_UNIQUE_NAME" -print); then
+                exit 1
+            fi
+            if [ -n "$DB_FILES" ]; then
+                echo "ERROR: Target database directory exists without its completion marker: $DB_FILES"
+                exit 1
+            fi
+        fi
+    done
+fi
 
 echo "=== Preflight: Check dedicated Listener and port ==="
 LISTENER_FILE="$TNS_ADMIN/listener.ora"
-if [ -e "$LISTENER_FILE" ]; then
+CONFIG=""
+if [ -f "$LISTENER_MARKER" ]; then
+    if [ ! -f "$LISTENER_FILE" ] || [ ! -r "$LISTENER_FILE" ]; then
+        echo "ERROR: Listener marker exists, but the Listener configuration is unavailable."
+        exit 1
+    fi
+    if ! CONFIG=$(sed 's/#.*//' "$LISTENER_FILE"); then
+        exit 1
+    fi
+    if printf '%s\n' "$CONFIG" | grep -Eiq '^[[:space:]]*IFILE[[:space:]]*='; then
+        echo "ERROR: Review included Listener configuration manually before using this simple script."
+        exit 1
+    fi
+    if ! printf '%s\n' "$CONFIG" | grep -Eiq "^[[:space:]]*$LISTENER_NAME[[:space:]]*=" ||
+       ! printf '%s\n' "$CONFIG" | tr -d '[:space:]' | grep -Fiq "(HOST=$DB_HOST)(PORT=$LISTENER_PORT)"; then
+        echo "ERROR: Listener marker and Listener configuration are inconsistent."
+        exit 1
+    fi
+
+    if ! LISTENER_STATUS=$("$ORACLE_HOME/bin/lsnrctl" status "$LISTENER_NAME"); then
+        echo "Target Listener is stopped. Starting the completed Listener for verification."
+        if ! "$ORACLE_HOME/bin/lsnrctl" start "$LISTENER_NAME"; then
+            echo "ERROR: Listener marker exists, but the target Listener could not be started."
+            exit 1
+        fi
+        if ! LISTENER_STATUS=$("$ORACLE_HOME/bin/lsnrctl" status "$LISTENER_NAME"); then
+            echo "ERROR: The target Listener did not remain available after startup."
+            exit 1
+        fi
+    fi
+    printf '%s\n' "$LISTENER_STATUS"
+    if ! printf '%s\n' "$LISTENER_STATUS" | tr -d '[:space:]' | grep -Fiq "(HOST=$DB_HOST)(PORT=$LISTENER_PORT)"; then
+        echo "ERROR: Listener marker and active Listener endpoint are inconsistent."
+        exit 1
+    fi
+
+    LISTENER_REQUIRED="N"
+    echo "Listener already completed and verified. Skip creation."
+elif [ -e "$LISTENER_FILE" ]; then
     if [ ! -r "$LISTENER_FILE" ]; then
         echo "ERROR: Cannot read $LISTENER_FILE"
         exit 1
@@ -1252,20 +1357,23 @@ if [ -e "$LISTENER_FILE" ]; then
     fi
     if printf '%s\n' "$CONFIG" | grep -Eiq "^[[:space:]]*$LISTENER_NAME[[:space:]]*=" ||
        printf '%s\n' "$CONFIG" | tr -d '[:space:]' | grep -Eiq "\\(PORT=0*$LISTENER_PORT\\)"; then
-        echo "ERROR: Listener name or port is already configured. Select a new name/port."
+        echo "ERROR: Listener name or port is configured without its completion marker. Review it before retrying."
         exit 1
     fi
 fi
-if printf '%s\n' "$PROCESSES" | grep -Eiq "(^|/)tnslsnr[[:space:]]+$LISTENER_NAME([[:space:]]|$)"; then
+if [ "$LISTENER_REQUIRED" = "Y" ] &&
+   printf '%s\n' "$PROCESSES" | grep -Eiq "(^|/)tnslsnr[[:space:]]+$LISTENER_NAME([[:space:]]|$)"; then
     echo "ERROR: Target Listener is already running."
     exit 1
 fi
-if ! SOCKETS=$(ss -H -ltn); then
-    exit 1
-fi
-if printf '%s\n' "$SOCKETS" | awk '{print $4}' | grep -Eq ":$LISTENER_PORT$"; then
-    echo "ERROR: TCP port $LISTENER_PORT is in use."
-    exit 1
+if [ "$LISTENER_REQUIRED" = "Y" ]; then
+    if ! SOCKETS=$(ss -H -ltn); then
+        exit 1
+    fi
+    if printf '%s\n' "$SOCKETS" | awk '{print $4}' | grep -Eq ":$LISTENER_PORT$"; then
+        echo "ERROR: TCP port $LISTENER_PORT is in use."
+        exit 1
+    fi
 fi
 
 echo "=== Review memory before creating resources ==="
@@ -1280,71 +1388,110 @@ echo "Database: $DB_NAME; Listener: $LISTENER_NAME:$LISTENER_PORT"
 echo "DATA: $DATA_DIR/$DB_UNIQUE_NAME; FRA: $FRA_DIR/$DB_UNIQUE_NAME"
 
 echo "=== 2. Create and start dedicated Listener ==="
-if ! mkdir -p "$TNS_ADMIN"; then
-    exit 1
-fi
-# Preserve the first listener configuration backup.
-LISTENER_BACKUP="$LISTENER_FILE.pre_create.bak"
-if [ -f "$LISTENER_FILE" ] && [ ! -e "$LISTENER_BACKUP" ]; then
-    if ! cp -p "$LISTENER_FILE" "$LISTENER_BACKUP"; then
-        echo "ERROR: Cannot back up the Listener configuration."
+if [ "$LISTENER_REQUIRED" = "Y" ]; then
+    if ! mkdir -p "$TNS_ADMIN"; then
         exit 1
     fi
-fi
-if ! WORK_DIR=$(mktemp -d "$TNS_ADMIN/.create_db.XXXXXX"); then
-    exit 1
-fi
-if [ -f "$LISTENER_FILE" ]; then
-    if ! cp -p "$LISTENER_FILE" "$WORK_DIR/listener.ora"; then
+    # Preserve the first listener configuration backup.
+    LISTENER_BACKUP="$LISTENER_FILE.pre_create.bak"
+    if [ -f "$LISTENER_FILE" ] && [ ! -e "$LISTENER_BACKUP" ]; then
+        if ! cp -p "$LISTENER_FILE" "$LISTENER_BACKUP"; then
+            echo "ERROR: Cannot back up the Listener configuration."
+            exit 1
+        fi
+    fi
+    if ! WORK_DIR=$(mktemp -d "$TNS_ADMIN/.create_db.XXXXXX"); then
         exit 1
     fi
-else
-    if ! : > "$WORK_DIR/listener.ora" || ! chmod 640 "$WORK_DIR/listener.ora"; then
+    if [ -f "$LISTENER_FILE" ]; then
+        if ! cp -p "$LISTENER_FILE" "$WORK_DIR/listener.ora"; then
+            exit 1
+        fi
+    else
+        if ! : > "$WORK_DIR/listener.ora" || ! chmod 640 "$WORK_DIR/listener.ora"; then
+            exit 1
+        fi
+    fi
+    if ! printf '\n%s =\n  (DESCRIPTION_LIST =\n    (DESCRIPTION =\n      (ADDRESS = (PROTOCOL = TCP)(HOST = %s)(PORT = %s))\n    )\n  )\n' \
+        "$LISTENER_NAME" "$DB_HOST" "$LISTENER_PORT" >> "$WORK_DIR/listener.ora"; then
+        echo "ERROR: Cannot prepare the dedicated Listener configuration."
         exit 1
     fi
-fi
-if ! printf '\n%s =\n  (DESCRIPTION_LIST =\n    (DESCRIPTION =\n      (ADDRESS = (PROTOCOL = TCP)(HOST = %s)(PORT = %s))\n    )\n  )\n' \
-    "$LISTENER_NAME" "$DB_HOST" "$LISTENER_PORT" >> "$WORK_DIR/listener.ora"; then
-    echo "ERROR: Cannot prepare the dedicated Listener configuration."
-    exit 1
-fi
-if ! mv "$WORK_DIR/listener.ora" "$LISTENER_FILE"; then
-    echo "ERROR: Cannot install the dedicated Listener configuration."
-    exit 1
-fi
-if ! "$ORACLE_HOME/bin/lsnrctl" start "$LISTENER_NAME"; then
-    echo "ERROR: Failed to start the target Listener. Review $LISTENER_FILE before retrying."
-    exit 1
-fi
-if ! LISTENER_STATUS=$("$ORACLE_HOME/bin/lsnrctl" status "$LISTENER_NAME"); then
-    echo "ERROR: The target Listener did not remain available after startup."
-    exit 1
-fi
-printf '%s\n' "$LISTENER_STATUS"
-if ! printf '%s\n' "$LISTENER_STATUS" | tr -d '[:space:]' | grep -Fiq "(HOST=$DB_HOST)(PORT=$LISTENER_PORT)"; then
-    echo "ERROR: Listener endpoint does not match DB_HOST and LISTENER_PORT. Review before DBCA."
-    exit 1
+    if ! mv "$WORK_DIR/listener.ora" "$LISTENER_FILE"; then
+        echo "ERROR: Cannot install the dedicated Listener configuration."
+        exit 1
+    fi
+    if ! "$ORACLE_HOME/bin/lsnrctl" start "$LISTENER_NAME"; then
+        echo "ERROR: Failed to start the target Listener. Review $LISTENER_FILE before retrying."
+        exit 1
+    fi
+    if ! LISTENER_STATUS=$("$ORACLE_HOME/bin/lsnrctl" status "$LISTENER_NAME"); then
+        echo "ERROR: The target Listener did not remain available after startup."
+        exit 1
+    fi
+    printf '%s\n' "$LISTENER_STATUS"
+    if ! printf '%s\n' "$LISTENER_STATUS" | tr -d '[:space:]' | grep -Fiq "(HOST=$DB_HOST)(PORT=$LISTENER_PORT)"; then
+        echo "ERROR: Listener endpoint does not match DB_HOST and LISTENER_PORT. Review before DBCA."
+        exit 1
+    fi
+    if ! touch "$LISTENER_MARKER"; then
+        echo "ERROR: Failed to create Listener completion marker: $LISTENER_MARKER"
+        exit 1
+    fi
+    echo "Listener creation completed successfully."
 fi
 
 echo "=== 3. Create Database with DBCA ==="
-"$ORACLE_HOME/bin/dbca" -silent -createDatabase -responseFile "$DB_SECRET_DIR/dbca.rsp" \
-    -templateName General_Purpose.dbc \
-    -gdbName "$DB_NAME" -sid "$ORACLE_SID" \
-    -initParams "db_unique_name=$DB_UNIQUE_NAME" \
-    -databaseConfigType SINGLE -createAsContainerDatabase false \
-    -databaseType MULTIPURPOSE -storageType FS -useOMF true \
-    -datafileDestination "$DATA_DIR" \
-    -recoveryAreaDestination "$FRA_DIR" -recoveryAreaSize "$FRA_SIZE_MB" \
-    -characterSet "$CHARACTER_SET" -nationalCharacterSet "$NATIONAL_CHARACTER_SET" \
-    -memoryMgmtType AUTO_SGA -totalMemory "$TOTAL_MEMORY_MB" \
-    -listeners "$LISTENER_NAME" \
-    -enableArchive false -emConfiguration NONE -sampleSchema false </dev/null
+if [ "$DATABASE_REQUIRED" = "Y" ]; then
+    "$ORACLE_HOME/bin/dbca" -silent -createDatabase -responseFile "$DB_SECRET_DIR/dbca.rsp" \
+        -templateName General_Purpose.dbc \
+        -gdbName "$DB_NAME" -sid "$ORACLE_SID" \
+        -initParams "db_unique_name=$DB_UNIQUE_NAME" \
+        -databaseConfigType SINGLE -createAsContainerDatabase false \
+        -databaseType MULTIPURPOSE -storageType FS -useOMF true \
+        -datafileDestination "$DATA_DIR" \
+        -recoveryAreaDestination "$FRA_DIR" -recoveryAreaSize "$FRA_SIZE_MB" \
+        -characterSet "$CHARACTER_SET" -nationalCharacterSet "$NATIONAL_CHARACTER_SET" \
+        -memoryMgmtType AUTO_SGA -totalMemory "$TOTAL_MEMORY_MB" \
+        -listeners "$LISTENER_NAME" \
+        -enableArchive false -emConfiguration NONE -sampleSchema false </dev/null
 
-DBCA_RC=$?
-if [ "$DBCA_RC" -ne 0 ]; then
-    echo "ERROR: DBCA returned $DBCA_RC. Review $ORACLE_BASE/cfgtoollogs/dbca/$DB_NAME."
-    echo "Existing files are retained. No automatic retry or cleanup was performed."
-    exit "$DBCA_RC"
+    DBCA_RC=$?
+    if [ "$DBCA_RC" -ne 0 ]; then
+        echo "ERROR: DBCA returned $DBCA_RC. Review $ORACLE_BASE/cfgtoollogs/dbca/$DB_NAME."
+        echo "Existing files are retained. No automatic retry or cleanup was performed."
+        exit "$DBCA_RC"
+    fi
+
+    if ! REGISTERED_HOME=$(awk -F: -v name="$DB_NAME" '$0 !~ /^[[:space:]]*#/ && toupper($1)==name {print $2; exit}' /etc/oratab) ||
+       [ "$REGISTERED_HOME" != "$ORACLE_HOME" ]; then
+        echo "ERROR: DBCA succeeded, but /etc/oratab does not match the target Oracle Home."
+        exit 1
+    fi
+    if [ ! -f "$ORACLE_HOME/dbs/spfile$ORACLE_SID.ora" ]; then
+        echo "ERROR: DBCA succeeded, but the target spfile is missing."
+        exit 1
+    fi
+    if ! DATABASE_STATUS=$("$ORACLE_HOME/bin/sqlplus" -L -s / as sysdba <<'SQL'
+WHENEVER OSERROR EXIT FAILURE
+WHENEVER SQLERROR EXIT FAILURE
+SET HEADING OFF FEEDBACK OFF PAGES 0 VERIFY OFF ECHO OFF
+SELECT name || ':' || open_mode FROM v$database;
+EXIT SUCCESS
+SQL
+    ); then
+        echo "ERROR: DBCA succeeded, but the target database connection failed."
+        exit 1
+    fi
+    if ! printf '%s\n' "$DATABASE_STATUS" | grep -Eq "^[[:space:]]*$DB_NAME:READ WRITE[[:space:]]*$"; then
+        echo "ERROR: DBCA succeeded, but the database identity or open mode is inconsistent."
+        exit 1
+    fi
+    if ! touch "$DATABASE_MARKER"; then
+        echo "ERROR: Failed to create database completion marker: $DATABASE_MARKER"
+        exit 1
+    fi
+    echo "Database creation completed successfully."
 fi
 echo "=== 4-5. Set LOCAL_LISTENER and register ==="
 # Use an explicit address for both default and custom ports to remove stale aliases.

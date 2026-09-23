@@ -118,184 +118,28 @@ LISTENER_PORT
 - Listener
 - Database / DBCA
 
-例如：
-
-```text
-runInstaller
-→ INSTALL_MARKER
-
-orainstRoot.sh
-→ ORAINST_ROOT_MARKER
-
-root.sh
-→ ROOT_SH_MARKER
-```
-
-建議：
-
-```bash
-EXTRACT_MARKER="$ORACLE_HOME/.oracle_19c_extraction_complete"
-INSTALL_MARKER="$ORACLE_HOME/.oracle_19c_installer_complete"
-ORAINST_ROOT_MARKER="$ORA_INVENTORY/.orainstRoot_complete"
-ROOT_SH_MARKER="$ORACLE_HOME/.root_sh_complete"
-```
+每個建立階段必須有獨立完成狀態。只有該階段成功後才能建立 Marker；Marker 存在但實際狀態不一致時，必須停止，不得自動重做或修復。
 
 ---
 
-### 4. Profile 固定內容覆寫，不做 Migration
+### 4. Profile 管理
 
-安裝 Script 直接管理並覆寫下列 Profile 類檔案：
+Profile 採固定內容管理，不解析、merge 或 migration 舊 Profile。
+
+涉及以下檔案時：
 
 - `~/.bash_profile`
 - `~/.oracle_env`
 - `~/.bash_alias`
 - `~/.<hostname>.profile`
 
-每個檔案都必須遵守：
-
-1. 既有路徑若為 symbolic link 或 non-regular file，立即顯示 `ERROR` 並 `exit 1`。
-2. 第一次覆寫前備份既有 regular file，重跑時不得覆蓋首次備份。
-3. 通過檔案型態檢查後，直接覆寫專案定義的標準內容。
-4. 寫入後對每個檔案執行 `bash -n`；驗證失敗時立即 `exit 1`。
-5. 不解析舊內容、不 merge 舊設定，也不做 Profile Migration。
-
-#### Save database settings in the host profile
-
-`~/.<hostname>.profile` 由安裝 Script 完整管理。這一段不得使用：
-
-- `PROFILE_INPUT`
-- `PROFILE_TEMP`
-- `mktemp`
-- `awk`
-- BEGIN / END managed block
-- 舊 `ORACLE_SID`、`DB_NAME` 或 `DB_UNIQUE_NAME` 解析
-- Migration 或 merge 舊設定
-- `cmp`
-
-保留檔案型態檢查與第一次備份，然後直接覆寫固定內容：
-
-```bash
-HOST_PROFILE="$HOME/.$(hostname).profile"
-HOST_PROFILE_BACKUP="$HOST_PROFILE.pre_oracle_install.bak"
-
-if [ -L "$HOST_PROFILE" ]; then
-    echo "ERROR: Host profile must not be a symbolic link: $HOST_PROFILE"
-    exit 1
-fi
-
-if [ -e "$HOST_PROFILE" ] && [ ! -f "$HOST_PROFILE" ]; then
-    echo "ERROR: Host profile is not a regular file: $HOST_PROFILE"
-    exit 1
-fi
-
-if [ -f "$HOST_PROFILE" ] && [ ! -e "$HOST_PROFILE_BACKUP" ]; then
-    if ! cp -p "$HOST_PROFILE" "$HOST_PROFILE_BACKUP"; then
-        echo "ERROR: Failed to back up host profile: $HOST_PROFILE"
-        exit 1
-    fi
-fi
-
-if ! cat > "$HOST_PROFILE" <<EOF; then
-export ORACLE_SID="$ORACLE_SID"
-DB_NAME="$ORACLE_SID"
-DB_UNIQUE_NAME="$ORACLE_SID"
-EOF
-    echo "ERROR: Failed to write host profile: $HOST_PROFILE"
-    exit 1
-fi
-
-if ! bash -n "$HOST_PROFILE"; then
-    echo "ERROR: Host profile syntax validation failed."
-    exit 1
-fi
-```
-
-只有第一次遇到既有 regular file 時建立備份；後續重跑不得覆蓋該備份。每次重跑直接再次覆寫相同內容並執行 `bash -n`，不讀取或解析舊 Profile。
-
-核心行為：
-
-```text
-.<hostname>.profile
-→ 直接覆寫
-→ bash -n 驗證
-→ 重跑結果一致
-```
-
-這項修改只適用於 Host Profile 區段，不得順便重構其他安裝功能。
+必須完整讀取並遵守 [Oracle_Profile_Simplification_For_Codex.md](Oracle_Profile_Simplification_For_Codex.md)。該文件是 Profile 載入順序、檔案內容、備份、檔案型態與語法驗證的唯一詳細規格。
 
 ---
 
-### 5. Profile 載入流程保持簡單
+### 5. Oracle Software 與 root scripts
 
-建議：
-
-```text
-.bash_profile
-      ↓
-.oracle_env
-      ↓
-.<hostname>.profile
-      ↓
-.bash_alias
-```
-
-`.bash_profile`：
-
-```bash
-if [ -f "$HOME/.oracle_env" ]; then
-    . "$HOME/.oracle_env"
-fi
-```
-
-`.oracle_env`：
-
-```bash
-umask 022
-
-export ORACLE_BASE=/opt/oracle
-export ORACLE_HOME=/opt/oracle/product/19.3.0.0/db_1
-export LD_LIBRARY_PATH=$ORACLE_HOME/lib
-export PATH=$ORACLE_HOME/bin:$PATH
-export EDITOR=vi
-
-HOST_PROFILE="$HOME/.$(hostname).profile"
-
-if [ -f "$HOST_PROFILE" ]; then
-    . "$HOST_PROFILE"
-fi
-
-if [ -f "$HOME/.bash_alias" ]; then
-    . "$HOME/.bash_alias"
-fi
-```
-
-不要使用：
-- ORACLE_ENV_LOADING
-- ORACLE_ENV_SHELL_PID
-- BASHPID recursion guard
-
-除非真的有 recursive source 問題。
-
----
-
-### 6. Software 安裝可重跑
-
-不要每次重跑 `runInstaller`。
-
-簡單判斷：
-
-```bash
-if [ -f "$INSTALL_MARKER" ] &&
-   [ -f "$INVENTORY_FILE" ] &&
-   grep -Fq "LOC=\"$ORACLE_HOME\"" "$INVENTORY_FILE"; then
-
-    echo "Oracle software already installed. Skip."
-else
-    # runInstaller
-fi
-```
-
-原則：
+Oracle Software、`orainstRoot.sh` 與 `root.sh` 必須分別記錄完成狀態，不得因前一階段完成就同時略過後續階段。
 
 ```text
 Marker + Inventory 正常
@@ -308,55 +152,22 @@ Marker 存在但 Inventory 不一致
 → ERROR
 ```
 
-不要自動重裝或猜狀態。
+成功後才建立對應 Marker；失敗時保留現況並停止，不自動重裝或猜測完成狀態。
+
+涉及 `runInstaller`、Oracle Inventory、`orainstRoot.sh`、`root.sh` 或其完成 Marker 時，必須完整讀取並遵守 [Oracle_Root_Script_Rerun_Rules_For_Codex.md](Oracle_Root_Script_Rerun_Rules_For_Codex.md)。該文件是 Marker 路徑、執行順序、驗證與失敗重跑情境的唯一詳細規格。
 
 ---
 
-### 7. orainstRoot.sh 可重跑
+### 6. Listener / Database 的重跑原則
+
+使用兩個獨立 Marker：
 
 ```bash
-if [ -f "$ORAINST_ROOT_MARKER" ]; then
-    echo "orainstRoot.sh already completed. Skip."
-else
-    if ! "$ORA_INVENTORY/orainstRoot.sh"; then
-        echo "ERROR: orainstRoot.sh failed."
-        exit 1
-    fi
-
-    touch "$ORAINST_ROOT_MARKER"
-fi
+LISTENER_MARKER="$ORACLE_HOME/network/admin/.LSNR_${ORACLE_SID}_complete"
+DATABASE_MARKER="$ORACLE_BASE/.DB_${ORACLE_SID}_complete"
 ```
 
-成功才建立 Marker。
-
----
-
-### 8. root.sh 可重跑
-
-```bash
-if [ -f "$ROOT_SH_MARKER" ]; then
-    echo "root.sh already completed. Skip."
-else
-    if ! "$ORACLE_HOME/root.sh" <<ROOT_SCRIPT_INPUT
-$LOCAL_BIN_DIR
-n
-n
-n
-ROOT_SCRIPT_INPUT
-    then
-        echo "ERROR: root.sh failed."
-        exit 1
-    fi
-
-    touch "$ROOT_SH_MARKER"
-fi
-```
-
-成功才建立 Marker。
-
----
-
-### 9. Listener / Database 的重跑原則
+Marker 只代表對應建立階段已成功，重跑時仍須搭配實際狀態驗證。Marker 必須是 regular file；symbolic link 或 non-regular file 視為異常。
 
 #### Listener
 
@@ -369,39 +180,70 @@ Port 沒被占用
 
 如果是同一套 Script 已經成功建立：
 ```text
-可用自己的 Marker 或明確狀態判斷 SKIP
+Listener Marker 存在
++ listener.ora 內的 Listener 名稱、Host、Port 一致
++ Listener 可啟動並通過 status 驗證
+→ SKIP Listener creation
 ```
 
-如果發現未知 Listener：
+如果 Marker 存在但設定或實際 Listener 狀態不一致：
 ```text
-ERROR
+ERROR + exit 1
 ```
 
-不要做 merge 或 reuse。
+如果 Marker 不存在但發現 Listener 名稱、Port、程序或設定痕跡：
+```text
+ERROR + exit 1
+```
+
+不要 merge、reuse、接管或自動修復未知 Listener。已完成但目前停止的 Listener 可以啟動後驗證，不重新建立。
 
 #### Database
 
-Database 建立前：
+Database 使用兩個簡單狀態變數控制建立階段：
 
 ```bash
-if grep -q "^$ORACLE_SID:" /etc/oratab 2>/dev/null; then
-    echo "Database already exists. Skip."
-else
-    # dbca
-fi
+LISTENER_REQUIRED="Y"
+DATABASE_REQUIRED="Y"
 ```
 
-更嚴謹時可再搭配：
-- PMON
-- spfile
-- password file
-- data directory
+判斷原則：
 
-但不要加入 Migration 邏輯。
+```text
+Database Marker 存在
++ /etc/oratab 的 SID 與 Oracle Home 一致
++ spfile 存在
++ Database 可啟動並以 OS authentication 連線
++ Database name 與 open mode 一致
+→ DATABASE_REQUIRED=N，SKIP DBCA
+
+Database Marker 存在但實際狀態不一致
+→ ERROR + exit 1
+
+Database Marker 不存在
++ 沒有 /etc/oratab、PMON、dbs 檔案及 DATA/FRA 目錄痕跡
+→ DATABASE_REQUIRED=Y，RUN DBCA
+
+Database Marker 不存在
++ 已出現任一 Database 痕跡
+→ ERROR + exit 1，交由 DBA review
+```
+
+Database 建立流程分成三段：
+
+```text
+1. Listener creation
+2. DBCA creation and basic database verification
+3. LOCAL_LISTENER, service registration, connectivity and profile verification
+```
+
+`DATABASE_MARKER` 必須在 DBCA 成功，且 `/etc/oratab`、spfile、Database identity、open mode 與 OS authentication 連線驗證完成後立即建立。若第 3 段失敗，下一次重跑略過 DBCA，但仍重新執行 post-configuration and verification。
+
+不要自動刪除失敗 DBCA 留下的檔案，不要修復 `/etc/oratab`，也不要接管未知 Database。這是新機安裝工具，不是 Repair 工具。
 
 ---
 
-### 10. Directory 規則
+### 7. Directory 規則
 
 新機模式下：
 
@@ -423,118 +265,10 @@ fi
 
 ---
 
-## Codex 修改要求
+## 修改邊界
 
-請依以下原則簡化 Oracle 安裝 Script：
-
-1. 本專案只支援全新主機安裝。
-2. 不支援舊 Oracle 環境 Migration。
-3. 固定環境參數統一來自 `oracle_install.conf`。
-4. 部署識別參數 `ORACLE_SID` 與 `LISTENER_PORT` 必須由 DBA 執行時人工輸入，完成驗證後再傳給後續步驟。
-5. 不再從舊 Profile 或舊 Oracle 設定反推參數。
-6. 移除不必要的：
-   - Profile migration
-   - managed block parser
-   - 舊 assignment parser
-   - merge 舊設定
-   - legacy compatibility logic
-7. Profile 可直接以固定內容覆蓋。
-   - `~/.bash_profile`
-   - `~/.oracle_env`
-   - `~/.bash_alias`
-   - `~/.<hostname>.profile`
-   - 修改前保留第一次備份。
-   - 拒絕 symbolic link 與 non-regular file。
-   - 寫入後逐一執行 `bash -n`。
-   - 不解析、merge 或 migration 舊內容。
-8. 重跑能力必須保留。
-9. 重跑依靠：
-   - Marker
-   - Oracle Inventory
-   - 明確 Oracle 狀態
-   - Oracle Software / `runInstaller`
-   - `orainstRoot.sh`
-   - `root.sh`
-   - Listener
-   - Database / DBCA
-10. 已完成步驟 → SKIP。
-11. 未完成步驟 → RUN。
-12. 異常、不一致或未知舊環境 → `ERROR` 並 `exit 1`。
-13. 不要加入自動 Migration 或自動修復。
-14. 不要為了縮短程式碼刪除必要的：
-   - 失敗 `exit 1`
-   - 語法驗證
-   - 基本狀態驗證
-15. 不使用進階 Shell 技巧。
-16. 優先保持：
-   - 簡單
-   - 可讀
-   - 可重複執行
-   - 容易維護
-17. 只修改需求涉及的必要區段，不順便重構其他功能。
-
----
-
-## DBA 簡單摘要
-
-這套 Script 的定位：
-
-```text
-新機安裝工具
-```
-
-不是：
-
-```text
-Oracle Migration / Repair 工具
-```
-
-固定環境參數統一從：
-
-```text
-oracle_install.conf
-```
-
-取得；部署識別參數則由 DBA 執行時輸入：
-
-```text
-ORACLE_SID
-LISTENER_PORT
-```
-
-Script 不再：
-- 讀舊 Profile
-- 猜舊 SID
-- merge 舊設定
-- migration 舊 Oracle Home
-
-可重跑則靠：
-
-```text
-完成過的步驟 → SKIP
-沒完成的步驟 → RUN
-```
-
-例如：
-
-```text
-runInstaller 完成
-→ 下次 SKIP
-
-orainstRoot.sh 完成
-→ 下次 SKIP
-
-root.sh 完成
-→ 下次 SKIP
-```
-
-核心原則：
-
-```text
-Profile      → 直接覆寫
-固定設定     → oracle_install.conf
-SID / Port   → DBA 人工輸入
-Oracle 資源  → 已完成 SKIP，未完成 RUN，異常 ERROR
-```
-
-支援重跑，不支援 Migration；只修改必要區段，不順便重構其他功能。
+- 只修改需求涉及的區段，不順便重構其他功能。
+- 不為縮短程式碼而移除失敗處理、語法驗證或基本狀態驗證。
+- 不加入 Profile migration、舊設定解析、既有 Oracle 環境接管或自動修復。
+- 涉及 Profile 或 root scripts 時，以對應專項 Reference 為唯一詳細實作規格。
+- 若總規格與專項 Reference 出現重複細節，應移除總規格中的副本並保留路由，不建立第二份實作規則。

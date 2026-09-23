@@ -206,9 +206,9 @@ else
         echo "INFO: This checks the kernel minimum only; Oracle RU and full certification are not verified."
         PASS_COUNT=$((PASS_COUNT + 1))
     else
-        echo "WARN: Running kernel is below the documented minimum for $KERNEL_FAMILY: $KERNEL_RELEASE"
-        echo "WARN: Minimum kernel: $MINIMUM_KERNEL. Verify this combination in Oracle Certification."
-        WARN_COUNT=$((WARN_COUNT + 1))
+        echo "FAIL: Running kernel is below the documented minimum for $KERNEL_FAMILY: $KERNEL_RELEASE"
+        echo "FAIL: Minimum kernel: $MINIMUM_KERNEL"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
     fi
 
     if [ -n "$KERNEL_RU_NOTE" ]; then

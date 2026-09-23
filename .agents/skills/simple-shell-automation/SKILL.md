@@ -30,7 +30,7 @@ description: 撰寫、修改及整合 Linux Shell/Bash 自動化腳本，採用�
 - 修改本專案的 Oracle Linux 新機安裝、Oracle Database 19c 安裝、設定來源、安裝步驟狀態判斷或整體重跑邏輯時，必須先完整讀取並遵守 [references/Oracle_New_Server_Install_Rerun_Rules_For_Codex.md](references/Oracle_New_Server_Install_Rerun_Rules_For_Codex.md)。此專案定位為新機安裝工具；固定環境參數來自 `oracle_install.conf`，部署識別參數 `ORACLE_SID` 與 `LISTENER_PORT` 由 DBA 執行時人工輸入，重跑依靠 Marker、Oracle Inventory 與明確狀態，不解析舊設定，也不加入舊環境 Migration、接管、合併或自動修復。
 - 修改 Oracle 安裝腳本中的使用者 Profile 管理、`.bash_profile`、`.bashrc`、`.oracle_env`、Host Profile 或 DBA Alias 時，必須先完整讀取並遵守 [references/Oracle_Profile_Simplification_For_Codex.md](references/Oracle_Profile_Simplification_For_Codex.md)。
 - 修改 Oracle 安裝腳本中的 `orainstRoot.sh`、`root.sh`、完成 Marker 或安裝重跑判斷時，必須先完整讀取並遵守 [references/Oracle_Root_Script_Rerun_Rules_For_Codex.md](references/Oracle_Root_Script_Rerun_Rules_For_Codex.md)。
-- 若同一修改同時涉及上述多個範圍，必須讀取通用的新機安裝規格及所有相關專項參考；專項規則用來補充其對應區段的實作要求。
+- 若同一修改同時涉及上述多個範圍，必須讀取通用的新機安裝規格及所有相關專項參考。通用規格定義共通原則與文件路由；Profile 與 root scripts 專項 Reference 是各自範圍的唯一詳細實作規格。
 - 一般 Shell 任務不需要載入這些 Oracle 專案參考。
 
 ## 可重複執行的要求
