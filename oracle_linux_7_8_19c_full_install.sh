@@ -11,31 +11,43 @@ unset ORACLE_PASSWORD DB_PASSWORD PASSWORD_CONFIRM DB_PASSWORD_RSP
 # OL8 installation assumes acceptance of CV_ASSUME_DISTID=OL7 for the 19.3 media.
 # This script does not apply an RU or verify OS/kernel/Oracle certification.
 
-PACKAGE_NAME="oracle-database-preinstall-19c"
-LIMITS_FILE="/etc/security/limits.d/oracle-database-preinstall-19c.conf"
-SELINUX_CONFIG="/etc/selinux/config"
-TIMEZONE="Asia/Taipei"
-SOFTWARE_SOURCE_DIR="/opt/software/oracle"
-ZIP_FILE="LINUX.X64_193000_db_home.zip"
-ORACLE_BASE="/opt/oracle"
-ORACLE_HOME="/opt/oracle/product/19.3.0.0/db_1"
+if ! SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; then
+    echo "ERROR: Cannot determine the script directory."
+    exit 1
+fi
+CONFIG_FILE="$SCRIPT_DIR/oracle_install.conf"
+
+if [ -L "$CONFIG_FILE" ] || [ ! -f "$CONFIG_FILE" ]; then
+    echo "ERROR: Configuration must be a regular file: $CONFIG_FILE"
+    exit 1
+fi
+
+if ! . "$CONFIG_FILE"; then
+    echo "ERROR: Failed to load configuration: $CONFIG_FILE"
+    exit 1
+fi
+
+if [ -z "${PACKAGE_NAME:-}" ] || [ -z "${LIMITS_FILE:-}" ] ||
+   [ -z "${SELINUX_CONFIG:-}" ] || [ -z "${TIMEZONE:-}" ] ||
+   [ -z "${SOFTWARE_SOURCE_DIR:-}" ] || [ -z "${ZIP_FILE:-}" ] ||
+   [ -z "${ORACLE_BASE:-}" ] || [ -z "${ORACLE_HOME:-}" ] ||
+   [ -z "${ORA_INVENTORY:-}" ] || [ -z "${ORAINST_FILE:-}" ] ||
+   [ -z "${ORACLE_OWNER:-}" ] || [ -z "${ORACLE_GROUP:-}" ] ||
+   [ -z "${LOCAL_BIN_DIR:-}" ] || [ -z "${DATA_DIR:-}" ] ||
+   [ -z "${FRA_DIR:-}" ] || [ -z "${TOTAL_MEMORY_MB:-}" ] ||
+   [ -z "${FRA_SIZE_MB:-}" ] || [ -z "${CHARACTER_SET:-}" ] ||
+   [ -z "${NATIONAL_CHARACTER_SET:-}" ]; then
+    echo "ERROR: Required settings are missing from: $CONFIG_FILE"
+    exit 1
+fi
+
 EXTRACT_MARKER="$ORACLE_HOME/.oracle_19c_extraction_complete"
 INSTALL_MARKER="$ORACLE_HOME/.oracle_19c_installer_complete"
-ORA_INVENTORY="/opt/oraInventory"
-ORAINST_FILE="/etc/oraInst.loc"
-ORACLE_OWNER="oracle"
-ORACLE_GROUP="oinstall"
-# Database settings apply only with --create-db.
-DATA_DIR="/opt/oracle/oradata"
-FRA_DIR="/opt/oracle/fast_recovery_area"
-TOTAL_MEMORY_MB=2048
-FRA_SIZE_MB=10240
-CHARACTER_SET="AL32UTF8"
-NATIONAL_CHARACTER_SET="AL16UTF16"
-LISTENER_PORT=1521
+ORAINST_ROOT_MARKER="$ORA_INVENTORY/.orainstRoot_complete"
+ROOT_SH_MARKER="$ORACLE_HOME/.root_sh_complete"
+LISTENER_PORT=""
 DB_SERVICE=""
 DB_HOST="$(hostname -f 2>/dev/null)"
-LOCAL_BIN_DIR="/usr/local/bin"
 CREATE_DB=0
 DB_SECRET_DIR=""
 DB_WORKER_PID=""
@@ -49,22 +61,18 @@ for SCRIPT_OPTION in "$@"; do
             CREATE_DB=1
             ;;
         --help)
-            echo "Usage: $0 [--create-db] [--la-paz] [--set-password] [--help]"
+            echo "Usage: $0 [--create-db] [--set-password] [--help]"
             echo "Default: prepare Oracle Linux and install Oracle 19c software only."
             echo "--create-db: also create a single-instance non-CDB after installation."
             echo "--set-password: reset the existing oracle OS account password."
-            echo "--la-paz: use America/La_Paz instead of Asia/Taipei."
             exit 0
-            ;;
-        --la-paz)
-            TIMEZONE="America/La_Paz"
             ;;
         --set-password)
             PASSWORD_RESET_REQUESTED=1
             ;;
         *)
             echo "ERROR: Unknown option: $SCRIPT_OPTION"
-            echo "Usage: $0 [--create-db] [--la-paz] [--set-password] [--help]"
+            echo "Usage: $0 [--create-db] [--set-password] [--help]"
             exit 1
             ;;
     esac
@@ -162,14 +170,10 @@ if [ "$CREATE_DB" -eq 1 ]; then
         echo "Cancelled before system changes."
         exit 1
     fi
-    if ! IFS= read -r -p "Enter Listener TCP port (1024-65535) [$LISTENER_PORT]: " LISTENER_PORT_INPUT; then
+    if ! IFS= read -r -p "Enter Listener TCP port (1024-65535): " LISTENER_PORT; then
         echo "Cancelled before system changes."
         exit 1
     fi
-    if [ -n "$LISTENER_PORT_INPUT" ]; then
-        LISTENER_PORT="$LISTENER_PORT_INPUT"
-    fi
-    unset LISTENER_PORT_INPUT
     if [[ ! "$ORACLE_SID" =~ ^[A-Z][A-Z0-9]{0,7}$ ]] ||
        [[ ! "$LISTENER_PORT" =~ ^[1-9][0-9]{3,4}$ ]] ||
        [ "$LISTENER_PORT" -lt 1024 ] || [ "$LISTENER_PORT" -gt 65535 ]; then
@@ -210,6 +214,7 @@ if [ "$CREATE_DB" -eq 1 ]; then
     unset PASSWORD_CONFIRM
 fi
 echo "=== Installation settings ==="
+echo "Configuration: $CONFIG_FILE"
 echo "Oracle Home: $ORACLE_HOME; Base: $ORACLE_BASE; timezone: $TIMEZONE"
 echo "root.sh local bin: $LOCAL_BIN_DIR; existing helper scripts will be preserved."
 if [ "$CREATE_DB" -eq 1 ]; then
@@ -244,7 +249,7 @@ INVENTORY_FILE="$ORA_INVENTORY/ContentsXML/inventory.xml"
 INSTALL_REQUIRED="Y"
 
 # Inventory registration alone does not prove that runInstaller succeeded.
-# This marker records installer success only; root scripts run on every execution.
+# Each installer and root-script stage records its own successful completion.
 if [ -f "$INSTALL_MARKER" ]; then
     if ! IFS= read -r INSTALL_BATCH_ID < "$INSTALL_MARKER" ||
        [ -z "$INSTALL_BATCH_ID" ]; then
@@ -693,7 +698,6 @@ ORACLE_HOME_VALUE="$2"
 PROFILE_FILE="$HOME/.bash_profile"
 ALIAS_FILE="$HOME/.bash_alias"
 ENV_FILE="$HOME/.oracle_env"
-BASHRC_FILE="$HOME/.bashrc"
 
 echo ""
 echo "--- Configure Oracle DBA aliases ---"
@@ -703,7 +707,7 @@ if [ "$(id -un)" != "oracle" ]; then
     exit 1
 fi
 
-for TARGET_FILE in "$ALIAS_FILE" "$PROFILE_FILE" "$ENV_FILE" "$BASHRC_FILE"; do
+for TARGET_FILE in "$ALIAS_FILE" "$PROFILE_FILE" "$ENV_FILE"; do
     if [ -L "$TARGET_FILE" ] || { [ -e "$TARGET_FILE" ] && [ ! -f "$TARGET_FILE" ]; }; then
         echo "ERROR: Review symbolic link or non-regular profile path: $TARGET_FILE"
         exit 1
@@ -716,14 +720,14 @@ for TARGET_FILE in "$ALIAS_FILE" "$PROFILE_FILE" "$ENV_FILE" "$BASHRC_FILE"; do
     fi
 done
 
-# These four files use the fixed project standard on every run.
+# These three files use the fixed project standard on every run.
 if ! cat > "$ALIAS_FILE" <<'EOF'
 alias ORADATA="ls -lur /oradata/*_*/*/data/*.dbf"
 alias ORAPS="ps -ef | grep -iv 'grep' | egrep -i -n 'smon|lsnr'; df -h | grep -i /ora"
 alias dba="sqlplus / as sysdba"
 EOF
 then
-    echo "ERROR: Failed to write .bash_alias."
+    echo "ERROR: Failed to write $ALIAS_FILE"
     exit 1
 fi
 
@@ -731,23 +735,13 @@ echo "Oracle DBA aliases configured: $ALIAS_FILE"
 echo "Current user: $(id -un)"
 echo "Profile file: $PROFILE_FILE"
 
-# Load once per shell and block recursive loading from the host profile.
 if ! cat > "$ENV_FILE" <<EOF
-if [ "\${ORACLE_ENV_SHELL_PID:-}" = "\$BASHPID" ]; then
-    return
-fi
-ORACLE_ENV_SHELL_PID=\$BASHPID
-ORACLE_ENV_LOADING=1
-
 umask 022
 
 export ORACLE_BASE="$ORACLE_BASE_VALUE"
 export ORACLE_HOME="$ORACLE_HOME_VALUE"
 export LD_LIBRARY_PATH="\$ORACLE_HOME/lib"
-case ":\$PATH:" in
-    *":\$ORACLE_HOME/bin:"*) ;;
-    *) export PATH="\$ORACLE_HOME/bin:\$PATH" ;;
-esac
+export PATH="\$ORACLE_HOME/bin:\$PATH"
 export EDITOR=vi
 
 HOST_PROFILE="\$HOME/.\$(hostname).profile"
@@ -759,7 +753,6 @@ fi
 if [ -f "\$HOME/.bash_alias" ]; then
     . "\$HOME/.bash_alias"
 fi
-unset ORACLE_ENV_LOADING
 EOF
 then
     echo "ERROR: Failed to write $ENV_FILE"
@@ -767,11 +760,8 @@ then
 fi
 
 if ! cat > "$PROFILE_FILE" <<'EOF'
-if [ "${ORACLE_ENV_LOADING:-0}" = "1" ]; then
-    return
-fi
-if [ -f "$HOME/.bashrc" ]; then
-    . "$HOME/.bashrc"
+if [ -f "$HOME/.oracle_env" ]; then
+    . "$HOME/.oracle_env"
 fi
 EOF
 then
@@ -779,22 +769,18 @@ then
     exit 1
 fi
 
-if ! cat > "$BASHRC_FILE" <<'EOF'
-if [ "${ORACLE_ENV_LOADING:-0}" = "1" ]; then
-    return
-fi
-if [ -f "$HOME/.oracle_env" ]; then
-    . "$HOME/.oracle_env"
-fi
-EOF
-then
-    echo "ERROR: Failed to write $BASHRC_FILE"
+if ! bash -n "$ALIAS_FILE"; then
+    echo "ERROR: Bash syntax validation failed: $ALIAS_FILE"
     exit 1
 fi
 
-if ! bash -n "$ENV_FILE" || ! bash -n "$PROFILE_FILE" ||
-   ! bash -n "$BASHRC_FILE" || ! bash -n "$ALIAS_FILE"; then
-    echo "ERROR: Shell startup file syntax validation failed."
+if ! bash -n "$ENV_FILE"; then
+    echo "ERROR: Bash syntax validation failed: $ENV_FILE"
+    exit 1
+fi
+
+if ! bash -n "$PROFILE_FILE"; then
+    echo "ERROR: Bash syntax validation failed: $PROFILE_FILE"
     exit 1
 fi
 
@@ -1021,42 +1007,72 @@ fi
 echo ""
 echo "=== 16. Run orainstRoot.sh ==="
 
-if [ ! -f "$ORA_INVENTORY/orainstRoot.sh" ]; then
-    echo "ERROR: orainstRoot.sh was not found:"
-    echo "$ORA_INVENTORY/orainstRoot.sh"
+if [ -L "$ORAINST_ROOT_MARKER" ] ||
+   { [ -e "$ORAINST_ROOT_MARKER" ] && [ ! -f "$ORAINST_ROOT_MARKER" ]; }; then
+    echo "ERROR: orainstRoot.sh completion marker must be a regular file: $ORAINST_ROOT_MARKER"
     exit 1
 fi
 
-if ! "$ORA_INVENTORY/orainstRoot.sh"; then
-    echo "ERROR: orainstRoot.sh failed."
-    exit 1
-fi
+if [ -f "$ORAINST_ROOT_MARKER" ]; then
+    echo "orainstRoot.sh already completed. Skip."
+else
+    if [ ! -f "$ORA_INVENTORY/orainstRoot.sh" ]; then
+        echo "ERROR: orainstRoot.sh was not found:"
+        echo "$ORA_INVENTORY/orainstRoot.sh"
+        exit 1
+    fi
 
-echo "orainstRoot.sh completed successfully."
+    if ! "$ORA_INVENTORY/orainstRoot.sh"; then
+        echo "ERROR: orainstRoot.sh failed."
+        exit 1
+    fi
+
+    if ! touch "$ORAINST_ROOT_MARKER"; then
+        echo "ERROR: Failed to create orainstRoot.sh completion marker: $ORAINST_ROOT_MARKER"
+        exit 1
+    fi
+
+    echo "orainstRoot.sh completed successfully."
+fi
 
 
 echo ""
 echo "=== 17. Run root.sh ==="
 
-if [ ! -f "$ORACLE_HOME/root.sh" ]; then
-    echo "ERROR: root.sh was not found:"
-    echo "$ORACLE_HOME/root.sh"
+if [ -L "$ROOT_SH_MARKER" ] ||
+   { [ -e "$ROOT_SH_MARKER" ] && [ ! -f "$ROOT_SH_MARKER" ]; }; then
+    echo "ERROR: root.sh completion marker must be a regular file: $ROOT_SH_MARKER"
     exit 1
 fi
 
-# Answer the standard local-bin prompt and preserve existing helper scripts.
-if ! "$ORACLE_HOME/root.sh" <<ROOT_SCRIPT_INPUT
+if [ -f "$ROOT_SH_MARKER" ]; then
+    echo "root.sh already completed. Skip."
+else
+    if [ ! -f "$ORACLE_HOME/root.sh" ]; then
+        echo "ERROR: root.sh was not found:"
+        echo "$ORACLE_HOME/root.sh"
+        exit 1
+    fi
+
+    # Answer the standard local-bin prompt and preserve existing helper scripts.
+    if ! "$ORACLE_HOME/root.sh" <<ROOT_SCRIPT_INPUT
 $LOCAL_BIN_DIR
 n
 n
 n
 ROOT_SCRIPT_INPUT
-then
-    echo "ERROR: root.sh failed."
-    exit 1
-fi
+    then
+        echo "ERROR: root.sh failed."
+        exit 1
+    fi
 
-echo "root.sh completed successfully."
+    if ! touch "$ROOT_SH_MARKER"; then
+        echo "ERROR: Failed to create root.sh completion marker: $ROOT_SH_MARKER"
+        exit 1
+    fi
+
+    echo "root.sh completed successfully."
+fi
 
 
 echo ""
@@ -1076,6 +1092,8 @@ if [ ! -f "$INVENTORY_FILE" ] ||
     exit 1
 fi
 echo "Installer marker: $INSTALL_MARKER"
+echo "orainstRoot.sh marker: $ORAINST_ROOT_MARKER"
+echo "root.sh marker: $ROOT_SH_MARKER"
 echo "Oracle Database 19c software is registered in Inventory."
 
 echo ""
@@ -1138,13 +1156,11 @@ DB_UNIQUE_NAME="$ORACLE_SID"
 LISTENER_NAME="LSNR_$ORACLE_SID"
 HOST_PROFILE="$HOME/.$(hostname).profile"
 WORK_DIR=""
-PROFILE_TEMP=""
 cleanup_db_work() {
     if [ -n "$WORK_DIR" ]; then
-        rm -f -- "$WORK_DIR/listener.ora" "$WORK_DIR/verify.sql"
+        rm -f -- "$WORK_DIR/listener.ora"
         rmdir -- "$WORK_DIR"
     fi
-    if [ -n "$PROFILE_TEMP" ]; then rm -f -- "$PROFILE_TEMP"; fi
 }
 trap cleanup_db_work EXIT
 trap 'exit 130' INT
@@ -1267,14 +1283,14 @@ echo "=== 2. Create and start dedicated Listener ==="
 if ! mkdir -p "$TNS_ADMIN"; then
     exit 1
 fi
-# Preserve the first backup before changing network settings.
-for CONFIG_FILE in listener.ora sqlnet.ora; do
-    if [ -f "$TNS_ADMIN/$CONFIG_FILE" ] && [ ! -e "$TNS_ADMIN/$CONFIG_FILE.pre_create.bak" ]; then
-        if ! cp -p "$TNS_ADMIN/$CONFIG_FILE" "$TNS_ADMIN/$CONFIG_FILE.pre_create.bak"; then
-            exit 1
-        fi
+# Preserve the first listener configuration backup.
+LISTENER_BACKUP="$LISTENER_FILE.pre_create.bak"
+if [ -f "$LISTENER_FILE" ] && [ ! -e "$LISTENER_BACKUP" ]; then
+    if ! cp -p "$LISTENER_FILE" "$LISTENER_BACKUP"; then
+        echo "ERROR: Cannot back up the Listener configuration."
+        exit 1
     fi
-done
+fi
 if ! WORK_DIR=$(mktemp -d "$TNS_ADMIN/.create_db.XXXXXX"); then
     exit 1
 fi
@@ -1353,7 +1369,8 @@ if ! "$ORACLE_HOME/bin/lsnrctl" status "$LISTENER_NAME" ||
     exit 1
 fi
 echo "Review the service listing above: the target instance should have READY status."
-if ! cat > "$WORK_DIR/verify.sql" <<SQL
+echo "Verify the SYSTEM connection using the password collected at startup."
+if ! "$ORACLE_HOME/bin/sqlplus" -L -s /nolog <<SQL
 WHENEVER OSERROR EXIT FAILURE
 WHENEVER SQLERROR EXIT FAILURE
 SET ECHO OFF VERIFY OFF DEFINE OFF
@@ -1361,90 +1378,30 @@ SET ECHO OFF VERIFY OFF DEFINE OFF
 SELECT SYS_CONTEXT('USERENV','INSTANCE_NAME') AS instance_name,
        SYS_CONTEXT('USERENV','SERVICE_NAME') AS service_name,
        SYS_CONTEXT('USERENV','CON_NAME') AS container_name FROM dual;
-BEGIN
-    IF LOWER(SYS_CONTEXT('USERENV','INSTANCE_NAME')) <> LOWER('$ORACLE_SID')
-       OR LOWER(SYS_CONTEXT('USERENV','SERVICE_NAME')) <> LOWER('$DB_SERVICE')
-       OR LOWER(SYS_CONTEXT('USERENV','CON_NAME')) <> LOWER('$DB_NAME') THEN
-        RAISE_APPLICATION_ERROR(-20002, 'Connected to an unexpected database target');
-    END IF;
-END;
-/
 EXIT SUCCESS
 SQL
 then
-    exit 1
-fi
-echo "Verify the SYSTEM connection using the password collected at startup."
-if ! "$ORACLE_HOME/bin/sqlplus" -L -s /nolog "@$WORK_DIR/verify.sql" </dev/null; then
-    echo "ERROR: SYSTEM connection or target verification failed."
+    echo "ERROR: SYSTEM connection or verification query failed."
     exit 1
 fi
 echo "Database creation and verification completed successfully."
 echo "Configure $TNS_ADMIN/tnsnames.ora manually if a local TNS alias is required."
 
-echo "=== Save database settings in the host profile ==="
-PROFILE_INPUT="$HOST_PROFILE"
-if [ ! -e "$HOST_PROFILE" ]; then
-    PROFILE_INPUT=/dev/null
-fi
-if ! PROFILE_TEMP=$(mktemp "$HOME/.db_profile.XXXXXX"); then
-    exit 1
-fi
-# Replace the managed block. Migrate simple assignments from older versions once.
-if ! awk '
-    /^# BEGIN ORACLE DATABASE SETTINGS$/ {
-        if (inside || seen++) exit 1
-        inside=1
-        next
-    }
-    /^# END ORACLE DATABASE SETTINGS$/ {
-        if (!inside) exit 1
-        inside=0
-        next
-    }
-    inside { next }
-    /^[[:space:]]*(export[[:space:]]+)?(ORACLE_SID|DB_NAME|DB_UNIQUE_NAME)=/ {
-        if ($0 !~ /^[[:space:]]*(export[[:space:]]+)?(ORACLE_SID|DB_NAME|DB_UNIQUE_NAME)=("[A-Za-z0-9_$./{}-]*"|[A-Za-z0-9_$./{}-]+)[[:space:]]*(#.*)?$/) exit 1
-        next
-    }
-    { print }
-    END { if (inside) exit 1 }
-' "$PROFILE_INPUT" > "$PROFILE_TEMP"; then
-    echo "ERROR: Cannot safely update profile assignments; original retained. Review $HOST_PROFILE."
-    exit 1
-fi
-if ! cat >> "$PROFILE_TEMP" <<EOF
-# BEGIN ORACLE DATABASE SETTINGS
+if ! cat > "$HOST_PROFILE" <<EOF; then
 export ORACLE_SID="$ORACLE_SID"
-DB_NAME="\$ORACLE_SID"
-DB_UNIQUE_NAME="\$ORACLE_SID"
-# END ORACLE DATABASE SETTINGS
+DB_NAME="$ORACLE_SID"
+DB_UNIQUE_NAME="$ORACLE_SID"
 EOF
-then
+    echo "ERROR: Failed to write host profile: $HOST_PROFILE"
     exit 1
 fi
-if ! bash -n "$PROFILE_TEMP"; then
-    echo "ERROR: Updated profile failed syntax validation; original retained."
+
+if ! bash -n "$HOST_PROFILE"; then
+    echo "ERROR: Host profile syntax validation failed: $HOST_PROFILE"
     exit 1
 fi
-if cmp -s "$PROFILE_INPUT" "$PROFILE_TEMP"; then
-    echo "Host profile is already configured; skipping update."
-else
-    if [ -f "$HOST_PROFILE" ]; then
-        if [ ! -e "$HOST_PROFILE.pre_db.bak" ]; then
-            if ! cp -p "$HOST_PROFILE" "$HOST_PROFILE.pre_db.bak"; then
-                exit 1
-            fi
-        fi
-        if ! chmod --reference="$HOST_PROFILE" "$PROFILE_TEMP"; then
-            exit 1
-        fi
-    fi
-    if ! mv "$PROFILE_TEMP" "$HOST_PROFILE"; then
-        exit 1
-    fi
-    echo "Updated host profile: $HOST_PROFILE"
-fi
+
+echo "Updated host profile: $HOST_PROFILE"
 echo "All steps completed. Profile settings apply to future logins."
 ORACLE_DATABASE_SCRIPT
     DB_WORKER_PID=$!

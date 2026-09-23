@@ -2,32 +2,45 @@
 
 # Read-only pre-install checks for Oracle Linux 7 / 8 and Oracle Database 19c.
 
-PACKAGE_NAME="oracle-database-preinstall-19c"
-PREINSTALL_SYSCTL="/etc/sysctl.d/99-oracle-database-preinstall-19c-sysctl.conf"
-CUSTOM_SYSCTL="/etc/sysctl.d/99-oracle-custom.conf"
-LIMITS_FILE="/etc/security/limits.d/oracle-database-preinstall-19c.conf"
-SELINUX_CONFIG="/etc/selinux/config"
-TIMEZONE="Asia/Taipei"
-SOFTWARE_SOURCE_DIR="/opt/software/oracle"
-ZIP_FILE="LINUX.X64_193000_db_home.zip"
-ORACLE_BASE="/opt/oracle"
-ORACLE_HOME="/opt/oracle/product/19.3.0.0/db_1"
+if ! SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; then
+    echo "FAIL: Cannot determine the script directory."
+    exit 1
+fi
+CONFIG_FILE="$SCRIPT_DIR/oracle_install.conf"
+
+if [ -L "$CONFIG_FILE" ] || [ ! -f "$CONFIG_FILE" ]; then
+    echo "FAIL: Configuration must be a regular file: $CONFIG_FILE"
+    exit 1
+fi
+
+if ! . "$CONFIG_FILE"; then
+    echo "FAIL: Failed to load configuration: $CONFIG_FILE"
+    exit 1
+fi
+
+if [ -z "${PACKAGE_NAME:-}" ] || [ -z "${PREINSTALL_SYSCTL:-}" ] ||
+   [ -z "${CUSTOM_SYSCTL:-}" ] || [ -z "${LIMITS_FILE:-}" ] ||
+   [ -z "${SELINUX_CONFIG:-}" ] || [ -z "${TIMEZONE:-}" ] ||
+   [ -z "${SOFTWARE_SOURCE_DIR:-}" ] || [ -z "${ZIP_FILE:-}" ] ||
+   [ -z "${ORACLE_BASE:-}" ] || [ -z "${ORACLE_HOME:-}" ] ||
+   [ -z "${ORA_INVENTORY:-}" ] || [ -z "${ORAINST_FILE:-}" ] ||
+   [ -z "${ORACLE_OWNER:-}" ] || [ -z "${ORACLE_GROUP:-}" ] ||
+   [ -z "${DATA_DIR:-}" ] || [ -z "${FRA_DIR:-}" ]; then
+    echo "FAIL: Required settings are missing from: $CONFIG_FILE"
+    exit 1
+fi
+
 EXTRACT_MARKER="$ORACLE_HOME/.oracle_19c_extraction_complete"
 INSTALL_MARKER="$ORACLE_HOME/.oracle_19c_installer_complete"
-ORA_INVENTORY="/opt/oraInventory"
-ORAINST_FILE="/etc/oraInst.loc"
-ORACLE_OWNER="oracle"
-ORACLE_GROUP="oinstall"
-DATA_DIR="/opt/oracle/oradata"
-FRA_DIR="/opt/oracle/fast_recovery_area"
 DB_HOST="$(hostname -f 2>/dev/null)"
 DB_SERVICE=""
 CREATE_DB=0
 ORACLE_SID=""
-LISTENER_PORT=1521
+LISTENER_PORT=""
 PASS_COUNT=0
 WARN_COUNT=0
 FAIL_COUNT=0
+OS_MAJOR=""
 PACKAGE_INSTALLED=0
 ORACLE_USER_EXISTS=0
 INSTALL_COMPLETE=0
@@ -55,16 +68,8 @@ while [ "$#" -gt 0 ]; do
             LISTENER_PORT="$2"
             shift 2
             ;;
-        --timezone)
-            if [ "$#" -lt 2 ]; then
-                echo "FAIL: --timezone requires a value."
-                exit 1
-            fi
-            TIMEZONE="$2"
-            shift 2
-            ;;
         --help)
-            echo "Usage: $0 [--create-db --sid SID --listener-port PORT] [--timezone ZONE]"
+            echo "Usage: $0 [--create-db --sid SID --listener-port PORT]"
             exit 0
             ;;
         *)
@@ -91,7 +96,8 @@ fi
 
 if [ -r /etc/os-release ]; then
     . /etc/os-release
-    case "$ID:${VERSION_ID%%.*}" in
+    OS_MAJOR="${VERSION_ID%%.*}"
+    case "$ID:$OS_MAJOR" in
         ol:7|ol:8)
             echo "PASS: Supported operating system detected: $ID $VERSION_ID"
             PASS_COUNT=$((PASS_COUNT + 1))
@@ -122,7 +128,7 @@ else
     FAIL_COUNT=$((FAIL_COUNT + 1))
 fi
 
-for REQUIRED_COMMAND in awk df find free getenforce getent grep hostname id ps rpm runuser sed ss stat sysctl systemctl timedatectl tr uname; do
+for REQUIRED_COMMAND in awk df find free getenforce getent grep hostname id ps rpm runuser sed sort ss stat sysctl systemctl timedatectl tr uname; do
     if command -v "$REQUIRED_COMMAND" >/dev/null 2>&1; then
         echo "PASS: Required command is available: $REQUIRED_COMMAND"
         PASS_COUNT=$((PASS_COUNT + 1))
@@ -131,6 +137,85 @@ for REQUIRED_COMMAND in awk df find free getenforce getent grep hostname id ps r
         FAIL_COUNT=$((FAIL_COUNT + 1))
     fi
 done
+
+# Check the running kernel against Oracle Database 19c documented minimums.
+KERNEL_RELEASE=""
+KERNEL_FAMILY=""
+MINIMUM_KERNEL=""
+KERNEL_RU_NOTE=""
+
+if ! KERNEL_RELEASE="$(uname -r 2>/dev/null)" || [ -z "$KERNEL_RELEASE" ]; then
+    echo "FAIL: Unable to determine the running kernel release with uname -r."
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+else
+    echo "Running kernel: $KERNEL_RELEASE"
+
+    case "$OS_MAJOR" in
+        7)
+            case "$KERNEL_RELEASE" in
+                4.1.*el7uek*)
+                    KERNEL_FAMILY="Oracle Linux 7 UEK4"
+                    MINIMUM_KERNEL="4.1.12-124.19.2.el7uek.x86_64"
+                    ;;
+                4.14.*el7uek*)
+                    KERNEL_FAMILY="Oracle Linux 7 UEK5"
+                    MINIMUM_KERNEL="4.14.35-1818.1.6.el7uek.x86_64"
+                    ;;
+                5.4.*el7uek*)
+                    KERNEL_FAMILY="Oracle Linux 7 UEK6"
+                    MINIMUM_KERNEL="5.4.17-2011.4.4.el7uek.x86_64"
+                    KERNEL_RU_NOTE="Oracle Linux 7 UEK6 requires Oracle Database 19c RU 19.9 or later; the current Oracle Home RU is not checked."
+                    ;;
+                *uek*)
+                    ;;
+                3.10.*el7*)
+                    KERNEL_FAMILY="Oracle Linux 7 RHCK"
+                    MINIMUM_KERNEL="3.10.0-862.11.6.el7.x86_64"
+                    ;;
+            esac
+            ;;
+        8)
+            case "$KERNEL_RELEASE" in
+                5.4.*el8uek*)
+                    KERNEL_FAMILY="Oracle Linux 8 UEK6"
+                    MINIMUM_KERNEL="5.4.17-2011.0.7.el8uek.x86_64"
+                    ;;
+                5.15.*el8uek*)
+                    KERNEL_FAMILY="Oracle Linux 8 UEK7"
+                    MINIMUM_KERNEL="5.15.0-202.135.2.el8uek.x86_64"
+                    KERNEL_RU_NOTE="Oracle Linux 8 UEK7 requires Oracle Database 19c RU 19.21 or later; the current Oracle Home RU is not checked."
+                    ;;
+                *uek*)
+                    ;;
+                4.18.*el8*)
+                    KERNEL_FAMILY="Oracle Linux 8 RHCK"
+                    MINIMUM_KERNEL="4.18.0-80.el8.x86_64"
+                    ;;
+            esac
+            ;;
+    esac
+
+    if [ -z "$MINIMUM_KERNEL" ]; then
+        echo "WARN: Kernel family is not recognized for Oracle Linux ${OS_MAJOR:-unknown}: $KERNEL_RELEASE"
+        echo "WARN: Verify this kernel and Oracle Database 19c combination in Oracle Certification."
+        WARN_COUNT=$((WARN_COUNT + 1))
+    elif ! command -v sort >/dev/null 2>&1; then
+        echo "WARN: Kernel minimum could not be evaluated because GNU sort is unavailable."
+    elif printf '%s\n%s\n' "$MINIMUM_KERNEL" "$KERNEL_RELEASE" | LC_ALL=C sort -V -C; then
+        echo "PASS: Running kernel meets the documented minimum for $KERNEL_FAMILY: $KERNEL_RELEASE"
+        echo "INFO: This checks the kernel minimum only; Oracle RU and full certification are not verified."
+        PASS_COUNT=$((PASS_COUNT + 1))
+    else
+        echo "WARN: Running kernel is below the documented minimum for $KERNEL_FAMILY: $KERNEL_RELEASE"
+        echo "WARN: Minimum kernel: $MINIMUM_KERNEL. Verify this combination in Oracle Certification."
+        WARN_COUNT=$((WARN_COUNT + 1))
+    fi
+
+    if [ -n "$KERNEL_RU_NOTE" ]; then
+        echo "INFO: $KERNEL_RU_NOTE"
+    fi
+fi
+# End running kernel check.
 
 echo ""
 echo "=== Package and operating system settings ==="
@@ -330,7 +415,11 @@ fi
 
 INVENTORY_FILE="$ORA_INVENTORY/ContentsXML/inventory.xml"
 if [ -f "$INSTALL_MARKER" ]; then
-    if [ -f "$INVENTORY_FILE" ] && grep -Fq "LOC=\"$ORACLE_HOME\"" "$INVENTORY_FILE"; then
+    if ! IFS= read -r INSTALL_BATCH_ID < "$INSTALL_MARKER" ||
+       [ -z "$INSTALL_BATCH_ID" ]; then
+        echo "FAIL: Installer completion marker has no installation batch ID: $INSTALL_MARKER"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+    elif [ -f "$INVENTORY_FILE" ] && grep -Fq "LOC=\"$ORACLE_HOME\"" "$INVENTORY_FILE"; then
         INSTALL_COMPLETE=1
         echo "PASS: Installer marker and Inventory registration are consistent."
         PASS_COUNT=$((PASS_COUNT + 1))
