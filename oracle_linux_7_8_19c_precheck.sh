@@ -26,7 +26,7 @@ if ! . "$CONFIG_FILE"; then
 fi
 
 if [ -z "${ORACLE_HOME:-}" ] || [ -z "${ORA_INVENTORY:-}" ] ||
-   [ -z "${ORAINST_FILE:-}" ]; then
+   [ -z "${ORAINST_FILE:-}" ] || [ -z "${ORACLE_GROUP:-}" ]; then
     echo "FAIL: Oracle Home or Inventory settings are missing from: $CONFIG_FILE"
     exit 1
 fi
@@ -102,7 +102,6 @@ if ! command -v grep >/dev/null 2>&1; then
     exit 1
 fi
 
-SOFTWARE_INVENTORY="$ORA_INVENTORY"
 if [ -L "$ORAINST_FILE" ] ||
    { [ -e "$ORAINST_FILE" ] && [ ! -f "$ORAINST_FILE" ]; }; then
     echo "FAIL: oraInst.loc must be a regular file: $ORAINST_FILE"
@@ -114,15 +113,23 @@ elif [ -f "$ORAINST_FILE" ]; then
         echo "PRECHECK RESULT: FAIL"
         exit 1
     fi
-    SOFTWARE_INVENTORY="$(sed -n 's/^inventory_loc=//p' "$ORAINST_FILE")"
-    if [ -z "$SOFTWARE_INVENTORY" ]; then
-        echo "FAIL: oraInst.loc is missing inventory_loc: $ORAINST_FILE"
+    DECLARED_ORA_INVENTORY="$(sed -n 's/^inventory_loc=//p' "$ORAINST_FILE")"
+    DECLARED_INVENTORY_GROUP="$(sed -n 's/^inst_group=//p' "$ORAINST_FILE")"
+    if [ -z "$DECLARED_ORA_INVENTORY" ] || [ -z "$DECLARED_INVENTORY_GROUP" ]; then
+        echo "FAIL: oraInst.loc is missing inventory_loc or inst_group: $ORAINST_FILE"
         echo "PRECHECK RESULT: FAIL"
         exit 1
     fi
+    if [ "$DECLARED_ORA_INVENTORY" != "$ORA_INVENTORY" ] ||
+       [ "$DECLARED_INVENTORY_GROUP" != "$ORACLE_GROUP" ]; then
+        echo "FAIL: oraInst.loc does not match oracle_install.conf: $ORAINST_FILE"
+        echo "PRECHECK RESULT: FAIL"
+        exit 1
+    fi
+    INVENTORY_DECLARED=1
 fi
 
-SOFTWARE_INVENTORY_FILE="$SOFTWARE_INVENTORY/ContentsXML/inventory.xml"
+SOFTWARE_INVENTORY_FILE="$ORA_INVENTORY/ContentsXML/inventory.xml"
 if [ -e "$INSTALL_MARKER" ] || [ -L "$INSTALL_MARKER" ] ||
    { [ -f "$SOFTWARE_INVENTORY_FILE" ] &&
      grep -Fq "LOC=\"$ORACLE_HOME\"" "$SOFTWARE_INVENTORY_FILE"; }; then
@@ -518,28 +525,12 @@ done
 echo ""
 echo "=== Oracle installation state ==="
 
-# oraInst.loc is authoritative when it already exists. PreCheck verifies the
-# declaration but never changes the Inventory path, group, or permissions.
+# oracle_install.conf is authoritative. A matching oraInst.loc only confirms
+# that the configured Inventory was previously declared.
 INVENTORY_GROUP="$ORACLE_GROUP"
-if [ -L "$ORAINST_FILE" ] ||
-   { [ -e "$ORAINST_FILE" ] && [ ! -f "$ORAINST_FILE" ]; }; then
-    echo "FAIL: oraInst.loc must be a regular file: $ORAINST_FILE"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-elif [ -f "$ORAINST_FILE" ]; then
-    DECLARED_ORA_INVENTORY="$(sed -n 's/^inventory_loc=//p' "$ORAINST_FILE")"
-    DECLARED_INVENTORY_GROUP="$(sed -n 's/^inst_group=//p' "$ORAINST_FILE")"
-    if [ -z "$DECLARED_ORA_INVENTORY" ] || [ -z "$DECLARED_INVENTORY_GROUP" ]; then
-        echo "FAIL: oraInst.loc is missing inventory_loc or inst_group: $ORAINST_FILE"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
-    elif [ "$DECLARED_ORA_INVENTORY" != "$ORA_INVENTORY" ] ||
-         [ "$DECLARED_INVENTORY_GROUP" != "$ORACLE_GROUP" ]; then
-        echo "FAIL: oraInst.loc does not match oracle_install.conf: $ORAINST_FILE"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
-    else
-        INVENTORY_DECLARED=1
-        echo "PASS: Existing Oracle Inventory is declared: $ORA_INVENTORY"
-        PASS_COUNT=$((PASS_COUNT + 1))
-    fi
+if [ "$INVENTORY_DECLARED" -eq 1 ]; then
+    echo "PASS: Existing Oracle Inventory is declared: $ORA_INVENTORY"
+    PASS_COUNT=$((PASS_COUNT + 1))
 else
     echo "WARN: Oracle Inventory will be created: $ORA_INVENTORY"
     WARN_COUNT=$((WARN_COUNT + 1))

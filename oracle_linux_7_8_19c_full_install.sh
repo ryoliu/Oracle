@@ -11,7 +11,8 @@ unset ORACLE_PASSWORD DB_PASSWORD PASSWORD_CONFIRM DB_PASSWORD_RSP
 # OL8 installation assumes acceptance of CV_ASSUME_DISTID=OL7 for the 19.3 media.
 # The Bug 29772579 workaround is enabled only when OL8 lacks compat-libcap1.
 # When enabled, OUI can ignore all prerequisite failures, so log review is required.
-# This script does not apply an RU or verify OS/kernel/Oracle certification.
+# Mandatory PreCheck verifies the supported OS and known kernel minimums.
+# This script does not apply an RU or replace full Oracle certification checks.
 #
 # Execution model for DBA review:
 #   1. Validate configuration, input, and any existing installation state.
