@@ -1,4 +1,4 @@
-# Oracle 新機安裝與可重跑簡化規格
+# Oracle 新機安裝與停止規格
 
 ## 目的
 
@@ -19,8 +19,33 @@
 - 不使用進階 Shell 技巧
 - 固定環境參數由 `oracle_install.conf` 提供
 - `ORACLE_SID` 與 `LISTENER_PORT` 由 DBA 執行時人工輸入
-- 已完成步驟直接 SKIP
-- 未完成步驟才執行
+- Oracle Software 已安裝時立即停止
+- 只有 Oracle Software 尚未安裝時才允許繼續新安裝
+
+---
+
+## 測試版 Patch 範圍
+
+目前測試版只使用 Oracle Database 19c 19.3 Base Media：
+
+```text
+LINUX.X64_193000_db_home.zip
+```
+
+目前測試環境沒有可用的 Oracle Release Update（RU）與新版 OPatch 安裝檔，因此不要在測試版加入：
+
+- RU Patch ZIP 或 OPatch Patch ZIP 的設定及下載流程
+- OPatch 更新
+- RU 解壓
+- `runInstaller -applyRU`
+- RU 或 OPatch completion Marker
+- `opatch lspatches`、`opatch lsinventory` 或其他 RU 套用結果驗證
+
+這個測試版只用於驗證 19.3 Base Media 的安裝流程、重跑狀態、Listener、DBCA、PreCheck 與 PostCheck，不是正式環境的 Patch 或認證基準。
+
+Oracle Linux 8 的 Bug 29772579 例外必須維持原有限制：只有確認 Oracle Linux 8 缺少 `compat-libcap1` 時，才允許對 19.3 Base Installer 使用 `-ignorePrereqFailure`。不得把這個例外擴大成一般 prerequisite bypass。
+
+未來取得 RU 與 OPatch 安裝檔後，必須先由 DBA 明確要求加入 Patch 流程，並先更新本 Reference，再設計 OPatch 更新、RU 解壓、`-applyRU`、Marker 與 Patch Inventory 驗證。不得因 Oracle 文件存在 RU 安裝方式，就自動把 RU 功能加入目前測試版。
 
 ---
 
@@ -58,7 +83,7 @@ ORACLE_SID
 LISTENER_PORT
 ```
 
-這兩個值由 DBA 每次執行時人工輸入，完成格式與範圍驗證後，再由主安裝 Script 傳給後續步驟。不得從舊 Profile、`/etc/oratab`、舊 Listener 或其他既有設定反推輸入值。
+只有確認 Oracle Software 尚未安裝後，才由 DBA 人工輸入這兩個值，完成格式與範圍驗證後，再由主安裝 Script 傳給後續步驟。不得從舊 Profile、`/etc/oratab`、舊 Listener 或其他既有設定反推輸入值。
 
 不要再解析舊設定來決定：
 - ORACLE_SID
@@ -77,8 +102,8 @@ LISTENER_PORT
 
 ```text
 全新主機                  → 支援
-同一套 Script 重跑        → 支援
-安裝失敗後再次重跑        → 支援
+Software 安裝前重跑       → 支援
+Software 已安裝後重跑     → 不支援，立即停止
 
 舊 Oracle Home            → 不支援
 舊 Database               → 不支援
@@ -98,29 +123,45 @@ LISTENER_PORT
 
 ---
 
-### 3. 重跑靠狀態判斷，不靠解析舊設定
+### 3. Oracle Software 是第一個停止條件
 
 固定環境參數由 `oracle_install.conf` 提供；`ORACLE_SID` 與 `LISTENER_PORT` 使用 DBA 本次執行時輸入的值。
 
-可重跑靠：
+PreCheck 必須先判斷 Oracle Software 是否已安裝。這項檢查必須位於 SID、Listener Port、作業系統密碼及 Database 密碼輸入之前。只要確認 Oracle Software 已安裝，就立即 `ERROR + exit 1`，不得把 Software 階段設為 SKIP 後繼續執行。
+
+判斷順序固定為：
 
 ```text
-已完成 → SKIP
-未完成 → RUN
-異常或不一致 → ERROR + exit 1
+Oracle Software 已安裝
+→ STOP
+→ 不做額外檢查
+
+Oracle Software 未安裝
+→ 才檢查 SID、Listener Name 與 Listener Port
 ```
 
-下列 Oracle 資源必須保留明確狀態判斷，不得使用舊 Profile 或舊設定內容代替狀態檢查：
+偵測到 Oracle Software 已安裝後，不得再檢查或處理：
 
-- Oracle Software / `runInstaller`
+- RU
+- OPatch
 - `orainstRoot.sh`
 - `root.sh`
 - Listener
-- Database / DBCA
+- Database
+- Profile
+- PostCheck
 
-每個建立階段必須有獨立完成狀態。只有該階段成功後才能建立 Marker；Marker 存在但實際狀態不一致時，必須停止，不得自動重做或修復。
+不再允許：
 
----
+```text
+Software 已安裝
+→ SKIP software
+→ 繼續建 Listener / Database
+```
+
+Oracle Inventory 已有目標 `ORACLE_HOME`、Installer completion Marker 存在，或其他既有判斷已足以確認目標 Software 安裝完成時，都必須立即停止。停止後不得為了判斷是否可以接續而再驗證其他階段。
+
+如果 Software 尚未安裝，但發現 Oracle Home、Inventory 或 Marker 處於未知、部分完成或不一致狀態，同樣立即停止，交由 DBA 處理；不得自動重裝、修復或接管。
 
 ### 4. Profile 管理
 
@@ -139,107 +180,135 @@ Profile 採固定內容管理，不解析、merge 或 migration 舊 Profile。
 
 ### 5. Oracle Software 與 root scripts
 
-Oracle Software、`orainstRoot.sh` 與 `root.sh` 必須分別記錄完成狀態，不得因前一階段完成就同時略過後續階段。
+`orainstRoot.sh` 與 `root.sh` 只屬於同一次全新安裝流程。它們可以在本次 Main Script 中依序執行並於成功後記錄 Marker，但不得用於下一次執行的續跑判斷。
 
 ```text
-Marker + Inventory 正常
-→ SKIP
+本次 runInstaller 成功
+→ 執行 orainstRoot.sh
+→ 執行 root.sh
 
-Marker 不存在
-→ RUN
-
-Marker 存在但 Inventory 不一致
-→ ERROR
+下一次執行偵測到 Software 已安裝
+→ 立即 STOP
+→ 不檢查 orainstRoot.sh 或 root.sh Marker
 ```
 
-成功後才建立對應 Marker；失敗時保留現況並停止，不自動重裝或猜測完成狀態。
+不得使用 `INSTALL_REQUIRED=N`、Installer Marker 或 Inventory 將 Software 階段設成 SKIP，再繼續執行任何 root script、Listener 或 Database 工作。
 
-涉及 `runInstaller`、Oracle Inventory、`orainstRoot.sh`、`root.sh` 或其完成 Marker 時，必須完整讀取並遵守 [Oracle_Root_Script_Rerun_Rules_For_Codex.md](Oracle_Root_Script_Rerun_Rules_For_Codex.md)。該文件是 Marker 路徑、執行順序、驗證與失敗重跑情境的唯一詳細規格。
+可以保留下列 Marker 作為稽核與衝突證據：
+
+```bash
+INSTALL_MARKER="$ORACLE_HOME/.oracle_19c_installer_complete"
+ORAINST_ROOT_MARKER="$ORA_INVENTORY/.orainstRoot_complete"
+ROOT_SH_MARKER="$ORACLE_HOME/.root_sh_complete"
+```
+
+只有對應步驟成功後才能建立 Marker。Marker 不代表下一次執行可以 SKIP 該階段並繼續；下一次執行只要確認 Oracle Software 已安裝，就立即停止，不得再檢查 root-script Marker。
+
+不允許：
+
+- 使用 `INSTALL_REQUIRED=N` 繼續後續安裝階段。
+- 因 `ORAINST_ROOT_MARKER` 或 `ROOT_SH_MARKER` 不存在而補跑 root scripts。
+- 使用 `/etc/oraInst.loc`、`/etc/oratab` 或 `oraenv` 判斷是否可以續跑。
+- 自動刪除 Oracle Home、Inventory 或 Marker。
+- 自動重裝、修復或接管既有 Oracle Software。
 
 ---
 
-### 6. Listener / Database 的重跑原則
+### 6. SID / Listener / Database 衝突規則
 
-使用兩個獨立 Marker：
+以下檢查只有在 Oracle Software 尚未安裝時才執行。Software 已安裝時，必須在進入 SID／Listener 檢查之前停止。
+
+#### ORACLE_SID 不得重複使用
+
+如果下列任一狀態存在，立即停止：
+
+```text
+/etc/oratab 已有相同 SID
+PMON 已有相同 SID
+$ORACLE_HOME/dbs 已有該 SID 的 spfile、pfile、password file 或 lock file
+DATA_DIR 已有該 SID 的資料目錄或檔案
+FRA_DIR 已有該 SID 的目錄或檔案
+Database Marker 顯示該 SID 已建立
+```
+
+錯誤訊息必須要求 DBA 改用不同 SID：
+
+```text
+ERROR: Oracle SID already exists or has existing database artifacts: ORCL
+Use a different ORACLE_SID and rerun the installer.
+```
+
+不得 reuse、start、repair、接管或刪除既有 Database 資源。
+
+#### Listener Name 不得重複使用
+
+Listener Name 固定由 SID 產生：
 
 ```bash
-LISTENER_MARKER="$ORACLE_HOME/network/admin/.LSNR_${ORACLE_SID}_complete"
-DATABASE_MARKER="$ORACLE_BASE/.DB_${ORACLE_SID}_complete"
+LISTENER_NAME="LSNR_$ORACLE_SID"
 ```
 
-Marker 只代表對應建立階段已成功，重跑時仍須搭配實際狀態驗證。Marker 必須是 regular file；symbolic link 或 non-regular file 視為異常。
+如果 `listener.ora`、`lsnrctl status`、Listener 程序或 Listener Marker 已有相同名稱，立即停止：
 
-#### Listener
-
-第一次：
 ```text
-Listener 不存在
-Port 沒被占用
-→ 建立
+ERROR: Listener already exists: LSNR_ORCL
+Use a different ORACLE_SID and rerun the installer.
 ```
 
-如果是同一套 Script 已經成功建立：
-```text
-Listener Marker 存在
-+ listener.ora 內的 Listener 名稱、Host、Port 一致
-+ Listener 可啟動並通過 status 驗證
-→ SKIP Listener creation
-```
+不得 reuse、start、merge、修改或接管既有 Listener。
 
-如果 Marker 存在但設定或實際 Listener 狀態不一致：
-```text
-ERROR + exit 1
-```
-
-如果 Marker 不存在但發現 Listener 名稱、Port、程序或設定痕跡：
-```text
-ERROR + exit 1
-```
-
-不要 merge、reuse、接管或自動修復未知 Listener。已完成但目前停止的 Listener 可以啟動後驗證，不重新建立。
-
-#### Database
-
-Database 使用兩個簡單狀態變數控制建立階段：
+#### Listener Port 必須未被使用
 
 ```bash
-LISTENER_REQUIRED="Y"
-DATABASE_REQUIRED="Y"
+if ss -H -ltn | awk '{print $4}' | grep -Eq ":${LISTENER_PORT}$"; then
+    echo "ERROR: Listener port is already in use: $LISTENER_PORT"
+    echo "Use an unused LISTENER_PORT and rerun the installer."
+    exit 1
+fi
 ```
 
-判斷原則：
+不得自動選擇下一個 Port、停止占用 Port 的程序、修改既有 Listener 或 reuse 已使用的 Port。
+
+#### PreCheck 與 Main
+
+PreCheck 順序固定為：
 
 ```text
-Database Marker 存在
-+ /etc/oratab 的 SID 與 Oracle Home 一致
-+ spfile 存在
-+ Database 可啟動並以 OS authentication 連線
-+ Database name 與 open mode 一致
-→ DATABASE_REQUIRED=N，SKIP DBCA
-
-Database Marker 存在但實際狀態不一致
-→ ERROR + exit 1
-
-Database Marker 不存在
-+ 沒有 /etc/oratab、PMON、dbs 檔案及 DATA/FRA 目錄痕跡
-→ DATABASE_REQUIRED=Y，RUN DBCA
-
-Database Marker 不存在
-+ 已出現任一 Database 痕跡
-→ ERROR + exit 1，交由 DBA review
+1. Oracle Software not already installed
+2. ORACLE_SID format valid
+3. ORACLE_SID not already used
+4. LISTENER_NAME not already used
+5. LISTENER_PORT valid
+6. LISTENER_PORT not currently in use
 ```
 
-Database 建立流程分成三段：
+第 1 項失敗時立即輸出 `PRECHECK RESULT: FAIL` 並停止，不得執行第 2 至第 6 項。其他任一項失敗同樣 `exit 1`。
+
+Main Script 必須在真正建立 Listener／Database 前再次確認 SID、Listener Name 與 Listener Port 未被使用。PreCheck 是第一層防護，Main 是第二層防護；但 Software 已安裝時不得進入任何第二層檢查。
+
+整體判斷：
 
 ```text
-1. Listener creation
-2. DBCA creation and basic database verification
-3. LOCAL_LISTENER, service registration, connectivity and profile verification
+Software 已安裝
+→ STOP
+
+Software 未安裝 + SID 已使用
+→ STOP
+
+Software 未安裝 + Listener Name 已使用
+→ STOP
+
+Software 未安裝 + Listener Port 已使用
+→ STOP
+
+Software 未安裝
++ SID 未使用
++ Listener Name 未使用
++ Listener Port 未使用
+→ 才允許繼續新的完整安裝
 ```
 
-`DATABASE_MARKER` 必須在 DBCA 成功，且 `/etc/oratab`、spfile、Database identity、open mode 與 OS authentication 連線驗證完成後立即建立。若第 3 段失敗，下一次重跑略過 DBCA，但仍重新執行 post-configuration and verification。
-
-不要自動刪除失敗 DBCA 留下的檔案，不要修復 `/etc/oratab`，也不要接管未知 Database。這是新機安裝工具，不是 Repair 工具。
+Database／Listener Marker 是已使用識別值的證據，不是允許 reuse 的依據。
 
 ---
 
@@ -270,5 +339,4 @@ Database 建立流程分成三段：
 - 只修改需求涉及的區段，不順便重構其他功能。
 - 不為縮短程式碼而移除失敗處理、語法驗證或基本狀態驗證。
 - 不加入 Profile migration、舊設定解析、既有 Oracle 環境接管或自動修復。
-- 涉及 Profile 或 root scripts 時，以對應專項 Reference 為唯一詳細實作規格。
-- 若總規格與專項 Reference 出現重複細節，應移除總規格中的副本並保留路由，不建立第二份實作規則。
+- Profile 規則維持在獨立 Reference；其他新機安裝停止、Marker、root scripts、SID、Listener 與 Database 規則以本文件為唯一規格。

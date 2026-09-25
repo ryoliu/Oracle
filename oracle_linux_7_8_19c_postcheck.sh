@@ -1,6 +1,11 @@
 #!/bin/bash
 
 # Read-only final health checks for Oracle Database 19c.
+#
+# The checks progress from the network listener to database identity:
+#   Listener process -> TCP port -> service registration -> client tools
+#   -> password-based Easy Connect -> SYSDBA instance state
+# No configuration is changed by this script. The first failed check exits 1.
 
 ORACLE_SID="$1"
 LISTENER_PORT="$2"
@@ -10,11 +15,14 @@ DB_SECRET_DIR="$5"
 LISTENER_NAME="LSNR_$ORACLE_SID"
 TNS_ADMIN="$ORACLE_HOME/network/admin"
 
+# Main already validates these deployment identifiers. PostCheck receives the
+# same values so every test targets the requested database and dedicated Listener.
 echo "========================================"
 echo " Oracle Database 19c PostCheck"
 echo "========================================"
 
 echo "=== 1. Verify Listener status ==="
+# lsnrctl status proves both Listener availability and the configured endpoint.
 if ! LISTENER_STATUS=$("$ORACLE_HOME/bin/lsnrctl" status "$LISTENER_NAME"); then
     echo "ERROR: Listener status check failed."
     exit 1
@@ -27,6 +35,7 @@ if ! printf '%s\n' "$LISTENER_STATUS" | tr -d '[:space:]' |
 fi
 
 echo "=== 2. Verify Listener port ==="
+# Confirm the operating system has an active TCP listening socket on the port.
 if ! ss -H -ltn | awk '{print $4}' | grep -Eq ":$LISTENER_PORT$"; then
     echo "ERROR: Listener TCP port is not active: $LISTENER_PORT"
     exit 1
@@ -34,6 +43,8 @@ fi
 echo "Listener TCP port is active: $LISTENER_PORT"
 
 echo "=== 3. Verify database service registration ==="
+# A listening port is not enough. The requested service and instance must be
+# dynamically registered with READY status.
 if ! LISTENER_SERVICES=$("$ORACLE_HOME/bin/lsnrctl" services "$LISTENER_NAME"); then
     echo "ERROR: Listener services check failed."
     exit 1
@@ -47,6 +58,7 @@ if ! printf '%s\n' "$LISTENER_SERVICES" | grep -Fiq "Service \"$DB_SERVICE\" has
 fi
 
 echo "=== 4. Verify tnsping ==="
+# Test Oracle Net name resolution and reachability with an Easy Connect string.
 if [ ! -x "$ORACLE_HOME/bin/tnsping" ]; then
     echo "ERROR: tnsping is missing or not executable: $ORACLE_HOME/bin/tnsping"
     exit 1
@@ -58,6 +70,8 @@ fi
 
 echo "=== 5. Verify SYSTEM Easy Connect ==="
 echo "Verify the SYSTEM connection using the password collected at startup."
+# This validates password authentication through Listener and service routing.
+# The connect.sql file is private and is removed by Main after PostCheck.
 if ! "$ORACLE_HOME/bin/sqlplus" -L -s /nolog <<SQL
 WHENEVER OSERROR EXIT FAILURE
 WHENEVER SQLERROR EXIT FAILURE
@@ -75,6 +89,8 @@ fi
 echo "SYSTEM Easy Connect verification completed successfully."
 
 echo "=== 6. Verify instance OPEN status ==="
+# Finish with local SYSDBA verification of database name, open mode, instance
+# name, and instance status. This distinguishes connectivity from database health.
 if ! DATABASE_STATUS=$("$ORACLE_HOME/bin/sqlplus" -L -s / as sysdba <<'SQL'
 WHENEVER OSERROR EXIT FAILURE
 WHENEVER SQLERROR EXIT FAILURE

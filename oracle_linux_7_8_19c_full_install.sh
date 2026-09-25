@@ -11,12 +11,26 @@ unset ORACLE_PASSWORD DB_PASSWORD PASSWORD_CONFIRM DB_PASSWORD_RSP
 # OL8 installation assumes acceptance of CV_ASSUME_DISTID=OL7 for the 19.3 media.
 # The Bug 29772579 prerequisite workaround is enabled only when OL8 lacks compat-libcap1.
 # This script does not apply an RU or verify OS/kernel/Oracle certification.
+#
+# Execution model for DBA review:
+#   1. Validate configuration, input, and any existing installation state.
+#   2. Prepare Oracle Linux and the oracle operating-system account.
+#   3. Extract and install the Oracle Database software.
+#   4. Run both Oracle root scripts in the same installation invocation.
+#   5. Optionally create and verify one single-instance non-CDB.
+#
+# Stop policy:
+#   - Installed Oracle Software stops the script before any deployment input.
+#   - Software and root-script markers are audit evidence, not resume points.
+#   - SID, Listener name, and Listener port must all be unused for a new install.
+#   - Unknown or partial state stops for DBA review; it is not repaired automatically.
 
 if ! SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; then
     echo "ERROR: Cannot determine the script directory."
     exit 1
 fi
 CONFIG_FILE="$SCRIPT_DIR/oracle_install.conf"
+PRECHECK_SCRIPT="$SCRIPT_DIR/oracle_linux_7_8_19c_precheck.sh"
 
 if [ -L "$CONFIG_FILE" ] || [ ! -f "$CONFIG_FILE" ]; then
     echo "ERROR: Configuration must be a regular file: $CONFIG_FILE"
@@ -28,27 +42,18 @@ if ! . "$CONFIG_FILE"; then
     exit 1
 fi
 
-if [ -z "${PACKAGE_NAME:-}" ] || [ -z "${LIMITS_FILE:-}" ] ||
-   [ -z "${SELINUX_CONFIG:-}" ] || [ -z "${TIMEZONE:-}" ] ||
-   [ -z "${SOFTWARE_SOURCE_DIR:-}" ] || [ -z "${ZIP_FILE:-}" ] ||
-   [ -z "${ORACLE_BASE:-}" ] || [ -z "${ORACLE_HOME:-}" ] ||
-   [ -z "${ORA_INVENTORY:-}" ] || [ -z "${ORAINST_FILE:-}" ] ||
-   [ -z "${ORACLE_OWNER:-}" ] || [ -z "${ORACLE_GROUP:-}" ] ||
-   [ -z "${LOCAL_BIN_DIR:-}" ] || [ -z "${DATA_DIR:-}" ] ||
-   [ -z "${FRA_DIR:-}" ] || [ -z "${TOTAL_MEMORY_MB:-}" ] ||
-   [ -z "${FRA_SIZE_MB:-}" ] || [ -z "${CHARACTER_SET:-}" ] ||
-   [ -z "${NATIONAL_CHARACTER_SET:-}" ]; then
-    echo "ERROR: Required settings are missing from: $CONFIG_FILE"
+if [ -z "${ORACLE_HOME:-}" ] || [ -z "${ORA_INVENTORY:-}" ] ||
+   [ -z "${ORAINST_FILE:-}" ]; then
+    echo "ERROR: Oracle Home or Inventory settings are missing from: $CONFIG_FILE"
     exit 1
 fi
 
-EXTRACT_MARKER="$ORACLE_HOME/.oracle_19c_extraction_complete"
 INSTALL_MARKER="$ORACLE_HOME/.oracle_19c_installer_complete"
 ORAINST_ROOT_MARKER="$ORA_INVENTORY/.orainstRoot_complete"
 ROOT_SH_MARKER="$ORACLE_HOME/.root_sh_complete"
 LISTENER_PORT=""
 DB_SERVICE=""
-DB_HOST="$(hostname -f 2>/dev/null)"
+DB_HOST=""
 CREATE_DB=0
 DB_SECRET_DIR=""
 DB_WORKER_PID=""
@@ -65,16 +70,7 @@ require_command() {
     fi
 }
 
-check_marker_file() {
-    local MARKER_FILE="$1"
-
-    if [ -L "$MARKER_FILE" ] ||
-       { [ -e "$MARKER_FILE" ] && [ ! -f "$MARKER_FILE" ]; }; then
-        echo "ERROR: Completion marker must be a regular file: $MARKER_FILE"
-        exit 1
-    fi
-}
-
+# Read the effective login limit as the oracle owner, not the root shell limit.
 show_oracle_limit() {
     local LIMIT_LABEL="$1"
     local LIMIT_OPTION="$2"
@@ -88,6 +84,8 @@ show_oracle_limit() {
     echo "$LIMIT_LABEL: $LIMIT_VALUE"
 }
 
+# Service state and boot enablement are separate checks. Both must match the
+# requested disabled state before this function reports success.
 disable_service() {
     local SERVICE_NAME="$1"
     local SERVICE_ACTIVE
@@ -118,6 +116,8 @@ disable_service() {
     fi
 }
 
+# Prefer /etc/localtime because timedatectl output differs slightly between
+# Oracle Linux releases and locales.
 get_current_timezone() {
     CURRENT_TIMEZONE=""
     TIMEZONE_TARGET="$(readlink -f /etc/localtime 2>/dev/null)"
@@ -138,6 +138,8 @@ get_current_timezone() {
     [ -n "$CURRENT_TIMEZONE" ]
 }
 
+# Keep command-line options intentionally small. SID and Listener port remain
+# interactive deployment identifiers and are not stored in oracle_install.conf.
 for SCRIPT_OPTION in "$@"; do
     case "$SCRIPT_OPTION" in
         --create-db)
@@ -161,7 +163,8 @@ for SCRIPT_OPTION in "$@"; do
     esac
 done
 
-# Only remove the exact temporary files created by this invocation.
+# Only remove credential and work files created by this invocation. Oracle
+# software, Inventory, Listener, and database files are never removed here.
 cleanup_install() {
     INSTALL_EXIT_CODE=$?
     if [ -n "$DB_WORKER_PID" ]; then
@@ -190,11 +193,38 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
+if [ -L "$PRECHECK_SCRIPT" ] || [ ! -f "$PRECHECK_SCRIPT" ]; then
+    echo "ERROR: PreCheck must be a regular file: $PRECHECK_SCRIPT"
+    exit 1
+fi
+
+echo ""
+echo "=== Mandatory PreCheck ==="
+
+# PreCheck evaluates Oracle Software first. Installed software stops here before
+# the script asks for passwords, SID, or Listener port.
+if ! bash "$PRECHECK_SCRIPT"; then
+    echo "ERROR: Mandatory PreCheck failed. No system changes were made."
+    exit 1
+fi
+
+echo "Mandatory general PreCheck completed successfully."
+
+if [ -z "${PACKAGE_NAME:-}" ] || [ -z "${LIMITS_FILE:-}" ] ||
+   [ -z "${SELINUX_CONFIG:-}" ] || [ -z "${TIMEZONE:-}" ] ||
+   [ -z "${SOFTWARE_SOURCE_DIR:-}" ] || [ -z "${ZIP_FILE:-}" ] ||
+   [ -z "${ORACLE_BASE:-}" ] || [ -z "${ORACLE_OWNER:-}" ] ||
+   [ -z "${ORACLE_GROUP:-}" ] || [ -z "${LOCAL_BIN_DIR:-}" ] ||
+   [ -z "${DATA_DIR:-}" ] || [ -z "${FRA_DIR:-}" ] ||
+   [ -z "${TOTAL_MEMORY_MB:-}" ] || [ -z "${FRA_SIZE_MB:-}" ] ||
+   [ -z "${CHARACTER_SET:-}" ] || [ -z "${NATIONAL_CHARACTER_SET:-}" ]; then
+    echo "ERROR: Required settings are missing from: $CONFIG_FILE"
+    exit 1
+fi
+
+DB_HOST="$(hostname -f 2>/dev/null)"
+
 require_command runuser
-check_marker_file "$EXTRACT_MARKER"
-check_marker_file "$INSTALL_MARKER"
-check_marker_file "$ORAINST_ROOT_MARKER"
-check_marker_file "$ROOT_SH_MARKER"
 
 if id "$ORACLE_OWNER" >/dev/null 2>&1; then
     ORACLE_USER_EXISTED_BEFORE_PREINSTALL=1
@@ -207,35 +237,19 @@ echo "=== 1. Set Oracle Installer Compatibility ==="
 
 . /etc/os-release
 INSTALLER_DISTID=""
+# The 19.3 base installer uses the OL7 compatibility identifier on OL8.
+# This changes Installer platform detection only; it does not change the OS.
 if [ "$ID" = "ol" ] && [ "${VERSION_ID%%.*}" = "8" ]; then
     INSTALLER_DISTID="OL7"
 fi
 
-# Collect all user input before installing packages or changing the system.
+# Collect deployment input only after the general PreCheck confirms that the
+# target Oracle Software is not installed and the new-install state is usable.
 if [ ! -t 0 ] || [ ! -t 1 ]; then
     echo "ERROR: Run this script in an interactive terminal."
     exit 1
 fi
-if [ "$ORACLE_USER_EXISTED_BEFORE_PREINSTALL" -eq 0 ] || [ "$PASSWORD_RESET_REQUESTED" -eq 1 ]; then
-    if ! IFS= read -r -s -p "Enter the oracle OS account password: " ORACLE_PASSWORD; then
-        printf '\n'
-        echo "Cancelled before system changes."
-        exit 1
-    fi
-    printf '\n'
-    if ! IFS= read -r -s -p "Confirm the oracle OS account password: " PASSWORD_CONFIRM; then
-        printf '\n'
-        echo "Cancelled before system changes."
-        exit 1
-    fi
-    printf '\n'
-    if [ -z "$ORACLE_PASSWORD" ] || [ "$ORACLE_PASSWORD" != "$PASSWORD_CONFIRM" ] ||
-       [[ "$ORACLE_PASSWORD" == *$'\n'* || "$ORACLE_PASSWORD" == *$'\r'* ]]; then
-        echo "ERROR: OS passwords must match, be nonempty and contain no line breaks."
-        exit 1
-    fi
-    unset PASSWORD_CONFIRM
-fi
+
 if [ "$CREATE_DB" -eq 1 ]; then
     if ! IFS= read -r -p "Enter SID (1-8 uppercase letters or digits, starting with a letter): " ORACLE_SID; then
         echo "Cancelled before system changes."
@@ -265,6 +279,40 @@ if [ "$CREATE_DB" -eq 1 ]; then
             exit 1
         fi
     done
+
+    echo ""
+    echo "=== Database and Listener Target PreCheck ==="
+    if ! bash "$PRECHECK_SCRIPT" --target-only \
+        --sid "$ORACLE_SID" --listener-port "$LISTENER_PORT"; then
+        echo "ERROR: Database and Listener target PreCheck failed. No system changes were made."
+        exit 1
+    fi
+    echo "Database and Listener target PreCheck completed successfully."
+fi
+
+# Password values remain in shell variables only until their required stage.
+if [ "$ORACLE_USER_EXISTED_BEFORE_PREINSTALL" -eq 0 ] || [ "$PASSWORD_RESET_REQUESTED" -eq 1 ]; then
+    if ! IFS= read -r -s -p "Enter the oracle OS account password: " ORACLE_PASSWORD; then
+        printf '\n'
+        echo "Cancelled before system changes."
+        exit 1
+    fi
+    printf '\n'
+    if ! IFS= read -r -s -p "Confirm the oracle OS account password: " PASSWORD_CONFIRM; then
+        printf '\n'
+        echo "Cancelled before system changes."
+        exit 1
+    fi
+    printf '\n'
+    if [ -z "$ORACLE_PASSWORD" ] || [ "$ORACLE_PASSWORD" != "$PASSWORD_CONFIRM" ] ||
+       [[ "$ORACLE_PASSWORD" == *$'\n'* || "$ORACLE_PASSWORD" == *$'\r'* ]]; then
+        echo "ERROR: OS passwords must match, be nonempty and contain no line breaks."
+        exit 1
+    fi
+    unset PASSWORD_CONFIRM
+fi
+
+if [ "$CREATE_DB" -eq 1 ]; then
     if ! IFS= read -r -s -p "Enter the shared SYS/SYSTEM password (no double quotes or control characters): " DB_PASSWORD; then
         printf '\n'
         echo "Cancelled before system changes."
@@ -300,7 +348,8 @@ fi
 CURRENT_STAGE="software installation"
 # BEGIN SOFTWARE INSTALLATION
 
-# Check existing Inventory without changing ownership or permissions.
+# An existing oraInst.loc is authoritative for the Inventory path and group.
+# Do not rewrite or adopt an Inventory whose declared directory is missing.
 INVENTORY_GROUP="$ORACLE_GROUP"
 if [ -f "$ORAINST_FILE" ]; then
     EXISTING_ORA_INVENTORY="$(sed -n 's/^inventory_loc=//p' "$ORAINST_FILE")"
@@ -317,44 +366,6 @@ if [ -f "$ORAINST_FILE" ]; then
 fi
 
 INVENTORY_FILE="$ORA_INVENTORY/ContentsXML/inventory.xml"
-INSTALL_REQUIRED="Y"
-
-# Inventory registration alone does not prove that runInstaller succeeded.
-# Each installer and root-script stage records its own successful completion.
-if [ -f "$INSTALL_MARKER" ]; then
-    if ! IFS= read -r INSTALL_BATCH_ID < "$INSTALL_MARKER" ||
-       [ -z "$INSTALL_BATCH_ID" ]; then
-        echo "ERROR: Installer completion marker has no installation batch ID."
-        echo "Legacy markers require DBA review of installer and root-script completion."
-        exit 1
-    fi
-    if [ ! -f "$INVENTORY_FILE" ] ||
-       ! grep -Fq "LOC=\"$ORACLE_HOME\"" "$INVENTORY_FILE"; then
-        echo "ERROR: Installer completion marker exists, but Inventory registration is missing."
-        echo "Review Oracle Home and Inventory before rerunning this script."
-        exit 1
-    fi
-    INSTALL_REQUIRED="N"
-elif [ -f "$INVENTORY_FILE" ] &&
-     grep -Fq "LOC=\"$ORACLE_HOME\"" "$INVENTORY_FILE"; then
-    echo "ERROR: Oracle Home is registered, but installer success has not been recorded."
-    echo "Review the previous installer logs and resolve the installation state before rerunning."
-    echo "Inventory registration alone is not treated as installation success."
-    exit 1
-fi
-
-if [ "$INSTALL_REQUIRED" = "Y" ] && [ ! -f "$EXTRACT_MARKER" ] &&
-   [ -d "$ORACLE_HOME" ]; then
-    if ! FIRST_HOME_ENTRY="$(find "$ORACLE_HOME" -mindepth 1 -maxdepth 1 -print -quit)"; then
-        echo "ERROR: Failed to inspect Oracle Home: $ORACLE_HOME"
-        exit 1
-    fi
-    if [ -n "$FIRST_HOME_ENTRY" ]; then
-        echo "ERROR: Oracle Home is not empty and has no completion marker: $ORACLE_HOME"
-        echo "DBA review is required before system changes."
-        exit 1
-    fi
-fi
 
 echo "=== 2. Check yum and install 19c preinstall package ==="
 
@@ -398,6 +409,8 @@ fi
 echo ""
 echo "=== 3. Apply Kernel Parameters ==="
 
+# Display Oracle-managed sysctl sources before applying the complete sysctl.d
+# configuration. The console output gives the DBA an audit trail.
 echo "Oracle sysctl files that will be applied:"
 
 ORACLE_SYSCTL_FOUND=0
@@ -444,6 +457,8 @@ echo "Kernel parameter verification completed successfully."
 echo ""
 echo "=== 5. Check Oracle User, Groups, and Directories ==="
 
+# The preinstall RPM is expected to create the oracle account and standard
+# installation groups. Missing identities after package installation are fatal.
 if ! id "$ORACLE_OWNER" >/dev/null 2>&1; then
     echo "ERROR: User does not exist: $ORACLE_OWNER"
     exit 1
@@ -483,6 +498,8 @@ else
 fi
 
 if [ -d "$ORA_INVENTORY" ]; then
+    # Preserve an existing Inventory exactly as found. Only verify that its
+    # group and oracle-owner access agree with oraInst.loc.
     if ! getent group "$INVENTORY_GROUP" >/dev/null; then
         echo "ERROR: Inventory group does not exist: $INVENTORY_GROUP"
         exit 1
@@ -511,7 +528,8 @@ else
     fi
 fi
 
-# Configure new directories only; preserve existing ownership and permissions.
+# New directories receive the project standard ownership and mode. Existing
+# directories are not silently chowned because they may require DBA review.
 for ORACLE_DIR in "$SOFTWARE_SOURCE_DIR" "$ORACLE_BASE" "$ORACLE_HOME"; do
     if [ "$ORACLE_DIR" -ef "$ORA_INVENTORY" ]; then
         continue
@@ -583,6 +601,8 @@ echo "Oracle user limit verification completed successfully."
 echo ""
 echo "=== 8. Disable SELinux ==="
 
+# Persistent and current SELinux states are separate. SELINUX=disabled takes
+# full effect after reboot; setenforce only changes the current running state.
 if [ ! -f "$SELINUX_CONFIG" ]; then
     echo "ERROR: SELinux configuration file was not found: $SELINUX_CONFIG"
     exit 1
@@ -676,6 +696,9 @@ fi
 
 echo "=== 12. Configure Oracle User Profile ==="
 
+# Profile load order is deliberately one-way:
+# .bash_profile -> .oracle_env -> host profile -> .bash_alias
+# The host profile is populated after database creation because it contains SID.
 echo "Switching to oracle user to configure shell startup files..."
 
 su - oracle -c "bash -s -- '$ORACLE_BASE' '$ORACLE_HOME'" <<'ORACLE_PROFILE_SCRIPT'
@@ -708,7 +731,8 @@ for TARGET_FILE in "$ALIAS_FILE" "$PROFILE_FILE" "$ENV_FILE"; do
     fi
 done
 
-# These three files use the fixed project standard on every run.
+# These files use the fixed project standard on every run. They do not parse or
+# merge an unknown legacy Oracle profile.
 if ! cat > "$ALIAS_FILE" <<'EOF'
 alias ORADATA="ls -lur /oradata/*_*/*/data/*.dbf"
 alias ORAPS="ps -ef | grep -iv 'grep' | egrep -i -n 'smon|lsnr'; df -h | grep -i /ora"
@@ -786,90 +810,70 @@ echo "Oracle shell startup configuration completed."
 echo ""
 echo "=== 13. Extract Oracle 19c Database Home ==="
 
-# The marker records successful extraction only, not installation or file integrity.
-if [ "$INSTALL_REQUIRED" = "N" ]; then
-    echo "Installer completion marker and Inventory registration found. Skipping extraction."
-elif [ -f "$EXTRACT_MARKER" ]; then
-    echo "Oracle 19c was already extracted. Skipping extraction."
-    echo "Completion marker: $EXTRACT_MARKER"
-else
-    if [ ! -f "$SOFTWARE_SOURCE_DIR/$ZIP_FILE" ]; then
-        echo "ERROR: Prerequisite configuration is complete, but the Oracle 19c ZIP file is missing:"
-        echo "$SOFTWARE_SOURCE_DIR/$ZIP_FILE"
-        echo "Copy the ZIP file to SOFTWARE_SOURCE_DIR and rerun this script."
-        exit 1
-    fi
-
-    require_command unzip
-
-    if ! ZIP_OWNER="$(stat -Lc %U "$SOFTWARE_SOURCE_DIR/$ZIP_FILE")"; then
-        echo "ERROR: Failed to check ZIP file owner."
-        exit 1
-    fi
-
-    if [ "$ZIP_OWNER" = "$ORACLE_OWNER" ]; then
-        echo "ZIP file owner is already $ORACLE_OWNER. Skipping ownership change."
-    else
-        echo "Changing ZIP file owner from $ZIP_OWNER to $ORACLE_OWNER..."
-        if ! chown "$ORACLE_OWNER" "$SOFTWARE_SOURCE_DIR/$ZIP_FILE"; then
-            echo "ERROR: Failed to change ZIP file owner."
-            exit 1
-        fi
-
-        if ! ZIP_OWNER="$(stat -Lc %U "$SOFTWARE_SOURCE_DIR/$ZIP_FILE")" ||
-           [ "$ZIP_OWNER" != "$ORACLE_OWNER" ]; then
-            echo "ERROR: ZIP file owner verification failed."
-            exit 1
-        fi
-        echo "ZIP file owner was changed to $ORACLE_OWNER."
-    fi
-
-    if ! runuser -u "$ORACLE_OWNER" -- test -r "$SOFTWARE_SOURCE_DIR/$ZIP_FILE"; then
-        echo "ERROR: $ORACLE_OWNER cannot read: $SOFTWARE_SOURCE_DIR/$ZIP_FILE"
-        exit 1
-    fi
-
-    if ! runuser -u "$ORACLE_OWNER" -- test -w "$ORACLE_HOME" ||
-       ! runuser -u "$ORACLE_OWNER" -- test -x "$ORACLE_HOME"; then
-        echo "ERROR: $ORACLE_OWNER cannot write to or access Oracle Home: $ORACLE_HOME"
-        exit 1
-    fi
-
-    # Include hidden files when checking whether Oracle Home is empty.
-    if ! FIRST_HOME_ENTRY="$(runuser -u "$ORACLE_OWNER" -- find "$ORACLE_HOME" -mindepth 1 -maxdepth 1 -print -quit)"; then
-        echo "ERROR: Failed to inspect Oracle Home: $ORACLE_HOME"
-        exit 1
-    fi
-
-    if [ -n "$FIRST_HOME_ENTRY" ]; then
-        echo "ERROR: Oracle Home is not empty and has no completion marker."
-        echo "Oracle Home: $ORACLE_HOME"
-        echo "DBA review is required. No files were removed or extracted."
-        echo "Use a clean Oracle Home after reviewing any existing or incomplete installation."
-        exit 1
-    fi
-
-    # Do not run another extraction or installer in this Oracle Home concurrently.
-    echo "Extracting: $SOFTWARE_SOURCE_DIR/$ZIP_FILE"
-    echo "Destination: $ORACLE_HOME"
-    echo "Extraction user: $ORACLE_OWNER"
-
-    if ! runuser -u "$ORACLE_OWNER" -- unzip -n "$SOFTWARE_SOURCE_DIR/$ZIP_FILE" -d "$ORACLE_HOME"; then
-        echo "ERROR: Oracle 19c extraction failed. No completion marker was created."
-        echo "Partial files may remain. Review Oracle Home before trying again."
-        exit 1
-    fi
-
-    # Create the marker as the software owner only after unzip succeeds.
-    if ! runuser -u "$ORACLE_OWNER" -- touch "$EXTRACT_MARKER"; then
-        echo "ERROR: Extraction succeeded, but the completion marker could not be created."
-        echo "DBA review is required before rerunning this script."
-        exit 1
-    fi
-
-    echo "Oracle 19c extraction completed."
-    echo "Completion marker: $EXTRACT_MARKER"
+if [ ! -f "$SOFTWARE_SOURCE_DIR/$ZIP_FILE" ]; then
+    echo "ERROR: Prerequisite configuration is complete, but the Oracle 19c ZIP file is missing:"
+    echo "$SOFTWARE_SOURCE_DIR/$ZIP_FILE"
+    exit 1
 fi
+
+require_command unzip
+
+if ! ZIP_OWNER="$(stat -Lc %U "$SOFTWARE_SOURCE_DIR/$ZIP_FILE")"; then
+    echo "ERROR: Failed to check ZIP file owner."
+    exit 1
+fi
+
+if [ "$ZIP_OWNER" = "$ORACLE_OWNER" ]; then
+    echo "ZIP file owner is already $ORACLE_OWNER. Skipping ownership change."
+else
+    echo "Changing ZIP file owner from $ZIP_OWNER to $ORACLE_OWNER..."
+    if ! chown "$ORACLE_OWNER" "$SOFTWARE_SOURCE_DIR/$ZIP_FILE"; then
+        echo "ERROR: Failed to change ZIP file owner."
+        exit 1
+    fi
+
+    if ! ZIP_OWNER="$(stat -Lc %U "$SOFTWARE_SOURCE_DIR/$ZIP_FILE")" ||
+       [ "$ZIP_OWNER" != "$ORACLE_OWNER" ]; then
+        echo "ERROR: ZIP file owner verification failed."
+        exit 1
+    fi
+    echo "ZIP file owner was changed to $ORACLE_OWNER."
+fi
+
+if ! runuser -u "$ORACLE_OWNER" -- test -r "$SOFTWARE_SOURCE_DIR/$ZIP_FILE"; then
+    echo "ERROR: $ORACLE_OWNER cannot read: $SOFTWARE_SOURCE_DIR/$ZIP_FILE"
+    exit 1
+fi
+
+if ! runuser -u "$ORACLE_OWNER" -- test -w "$ORACLE_HOME" ||
+   ! runuser -u "$ORACLE_OWNER" -- test -x "$ORACLE_HOME"; then
+    echo "ERROR: $ORACLE_OWNER cannot write to or access Oracle Home: $ORACLE_HOME"
+    exit 1
+fi
+
+# Include hidden files when checking whether Oracle Home is empty.
+if ! FIRST_HOME_ENTRY="$(runuser -u "$ORACLE_OWNER" -- find "$ORACLE_HOME" -mindepth 1 -maxdepth 1 -print -quit)"; then
+    echo "ERROR: Failed to inspect Oracle Home: $ORACLE_HOME"
+    exit 1
+fi
+
+if [ -n "$FIRST_HOME_ENTRY" ]; then
+    echo "ERROR: Oracle Home is not empty: $ORACLE_HOME"
+    echo "DBA review is required. No files were removed or extracted."
+    exit 1
+fi
+
+echo "Extracting: $SOFTWARE_SOURCE_DIR/$ZIP_FILE"
+echo "Destination: $ORACLE_HOME"
+echo "Extraction user: $ORACLE_OWNER"
+
+if ! runuser -u "$ORACLE_OWNER" -- unzip -n "$SOFTWARE_SOURCE_DIR/$ZIP_FILE" -d "$ORACLE_HOME"; then
+    echo "ERROR: Oracle 19c extraction failed."
+    echo "Partial files may remain. DBA review is required before another run."
+    exit 1
+fi
+
+echo "Oracle 19c extraction completed."
 
 echo "Installer path: $ORACLE_HOME/runInstaller"
 
@@ -881,142 +885,132 @@ if [ ! -f "$ORACLE_HOME/runInstaller" ]; then
     exit 1
 fi
 
-if [ "$INSTALL_REQUIRED" = "N" ]; then
-    echo "Previous installer success and Inventory registration were verified."
-    echo "Skip software installation."
+# -ignorePrereqFailure is enabled only for the documented OL8
+# compat-libcap1 false-positive condition associated with Bug 29772579.
+BUG_29772579_OPTION=""
+if [ "$ID" = "ol" ] && [ "${VERSION_ID%%.*}" = "8" ]; then
+    if rpm -q compat-libcap1 >/dev/null 2>&1; then
+        echo "compat-libcap1 is installed. Oracle Bug 29772579 workaround is not required."
+    else
+        BUG_29772579_OPTION="-ignorePrereqFailure"
+        echo "Oracle Bug 29772579 condition detected on Oracle Linux 8."
+        echo "compat-libcap1 is not installed; enable the documented prerequisite workaround."
+        echo "All other prerequisite failures must still be resolved."
+    fi
 fi
 
-if [ "$INSTALL_REQUIRED" = "Y" ]; then
-    BUG_29772579_OPTION=""
-    if [ "$ID" = "ol" ] && [ "${VERSION_ID%%.*}" = "8" ]; then
-        if rpm -q compat-libcap1 >/dev/null 2>&1; then
-            echo "compat-libcap1 is installed. Oracle Bug 29772579 workaround is not required."
-        else
-            BUG_29772579_OPTION="-ignorePrereqFailure"
-            echo "Oracle Bug 29772579 condition detected on Oracle Linux 8."
-            echo "compat-libcap1 is not installed; enable the documented prerequisite workaround."
-            echo "All other prerequisite failures must still be resolved."
-        fi
+# Run Oracle Universal Installer as the software owner. Exit code 6 means
+# installation completed with prerequisite warnings and requires log review.
+su - "$ORACLE_OWNER" -c "
+    unset CV_ASSUME_DISTID
+    if [ -n \"$INSTALLER_DISTID\" ]; then
+        export CV_ASSUME_DISTID=\"$INSTALLER_DISTID\"
     fi
+    cd \"$ORACLE_HOME\" &&
+    ./runInstaller $BUG_29772579_OPTION \
+        -silent \
+        -waitforcompletion \
+        oracle.install.option=INSTALL_DB_SWONLY \
+        UNIX_GROUP_NAME=\"$INVENTORY_GROUP\" \
+        INVENTORY_LOCATION=\"$ORA_INVENTORY\" \
+        ORACLE_HOME=\"$ORACLE_HOME\" \
+        ORACLE_BASE=\"$ORACLE_BASE\" \
+        oracle.install.db.InstallEdition=EE \
+        oracle.install.db.OSDBA_GROUP=dba \
+        oracle.install.db.OSOPER_GROUP=dba \
+        oracle.install.db.OSBACKUPDBA_GROUP=dba \
+        oracle.install.db.OSDGDBA_GROUP=dba \
+        oracle.install.db.OSKMDBA_GROUP=dba \
+        oracle.install.db.OSRACDBA_GROUP=dba \
+        oracle.install.db.rootconfig.executeRootScript=false
+"
 
-    su - "$ORACLE_OWNER" -c "
-        unset CV_ASSUME_DISTID
-        if [ -n \"$INSTALLER_DISTID\" ]; then
-            export CV_ASSUME_DISTID=\"$INSTALLER_DISTID\"
-        fi
-        cd \"$ORACLE_HOME\" &&
-        ./runInstaller $BUG_29772579_OPTION \
-            -silent \
-            -waitforcompletion \
-            oracle.install.option=INSTALL_DB_SWONLY \
-            UNIX_GROUP_NAME=\"$INVENTORY_GROUP\" \
-            INVENTORY_LOCATION=\"$ORA_INVENTORY\" \
-            ORACLE_HOME=\"$ORACLE_HOME\" \
-            ORACLE_BASE=\"$ORACLE_BASE\" \
-            oracle.install.db.InstallEdition=EE \
-            oracle.install.db.OSDBA_GROUP=dba \
-            oracle.install.db.OSOPER_GROUP=dba \
-            oracle.install.db.OSBACKUPDBA_GROUP=dba \
-            oracle.install.db.OSDGDBA_GROUP=dba \
-            oracle.install.db.OSKMDBA_GROUP=dba \
-            oracle.install.db.OSRACDBA_GROUP=dba \
-            oracle.install.db.rootconfig.executeRootScript=false
-    "
-
-    INSTALL_STATUS=$?
-    case "$INSTALL_STATUS" in
-        0)
-            echo "Oracle Database 19c software installation succeeded."
-            ;;
-        6)
-            echo "WARNING: Oracle Database 19c software installation succeeded with prerequisite warnings."
-            echo "Please review the Oracle installer log."
-            ;;
-        *)
-            echo "ERROR: Oracle Database 19c software installation failed."
-            echo "Exit code: $INSTALL_STATUS"
-            exit 1
-            ;;
-    esac
-
-    if [ ! -f "$INVENTORY_FILE" ] ||
-       ! grep -Fq "LOC=\"$ORACLE_HOME\"" "$INVENTORY_FILE"; then
-        echo "ERROR: Oracle Home was not registered in Inventory: $INVENTORY_FILE"
+INSTALL_STATUS=$?
+case "$INSTALL_STATUS" in
+    0)
+        echo "Oracle Database 19c software installation succeeded."
+        ;;
+    6)
+        echo "WARNING: Oracle Database 19c software installation succeeded with prerequisite warnings."
+        echo "Please review the Oracle installer log."
+        ;;
+    *)
+        echo "ERROR: Oracle Database 19c software installation failed."
+        echo "Exit code: $INSTALL_STATUS"
         exit 1
-    fi
+        ;;
+esac
 
-    if ! IFS= read -r INSTALL_BATCH_ID < /proc/sys/kernel/random/uuid ||
-       [ -z "$INSTALL_BATCH_ID" ]; then
-        echo "ERROR: Installer succeeded, but an installation batch ID could not be generated."
-        exit 1
-    fi
-
-    if ! printf '%s\n' "$INSTALL_BATCH_ID" > "$INSTALL_MARKER"; then
-        echo "ERROR: Installer succeeded, but its completion marker could not be created."
-        echo "Review the installation state before rerunning this script."
-        exit 1
-    fi
-
-    echo "Oracle Database 19c software installation completed."
+if [ ! -f "$INVENTORY_FILE" ] ||
+   ! grep -Fq "LOC=\"$ORACLE_HOME\"" "$INVENTORY_FILE"; then
+    echo "ERROR: Oracle Home was not registered in Inventory: $INVENTORY_FILE"
+    exit 1
 fi
+
+# Record success only after this exact Oracle Home appears in Inventory.
+if ! IFS= read -r INSTALL_BATCH_ID < /proc/sys/kernel/random/uuid ||
+   [ -z "$INSTALL_BATCH_ID" ]; then
+    echo "ERROR: Installer succeeded, but an installation batch ID could not be generated."
+    exit 1
+fi
+
+if ! printf '%s\n' "$INSTALL_BATCH_ID" > "$INSTALL_MARKER"; then
+    echo "ERROR: Installer succeeded, but its completion marker could not be created."
+    echo "DBA review is required before another run."
+    exit 1
+fi
+
+echo "Oracle Database 19c software installation completed."
 
 echo ""
 echo "=== 15. Run orainstRoot.sh ==="
 
-if [ -f "$ORAINST_ROOT_MARKER" ]; then
-    echo "orainstRoot.sh already completed. Skip."
-else
-    if [ ! -f "$ORA_INVENTORY/orainstRoot.sh" ]; then
-        echo "ERROR: orainstRoot.sh was not found:"
-        echo "$ORA_INVENTORY/orainstRoot.sh"
-        exit 1
-    fi
-
-    if ! "$ORA_INVENTORY/orainstRoot.sh"; then
-        echo "ERROR: orainstRoot.sh failed."
-        exit 1
-    fi
-
-    if ! touch "$ORAINST_ROOT_MARKER"; then
-        echo "ERROR: Failed to create orainstRoot.sh completion marker: $ORAINST_ROOT_MARKER"
-        exit 1
-    fi
-
-    echo "orainstRoot.sh completed successfully."
+if [ ! -f "$ORA_INVENTORY/orainstRoot.sh" ]; then
+    echo "ERROR: orainstRoot.sh was not found:"
+    echo "$ORA_INVENTORY/orainstRoot.sh"
+    exit 1
 fi
+
+if ! "$ORA_INVENTORY/orainstRoot.sh"; then
+    echo "ERROR: orainstRoot.sh failed."
+    exit 1
+fi
+
+if ! touch "$ORAINST_ROOT_MARKER"; then
+    echo "ERROR: Failed to create orainstRoot.sh completion marker: $ORAINST_ROOT_MARKER"
+    exit 1
+fi
+
+echo "orainstRoot.sh completed successfully."
 
 
 echo ""
 echo "=== 16. Run root.sh ==="
 
-if [ -f "$ROOT_SH_MARKER" ]; then
-    echo "root.sh already completed. Skip."
-else
-    if [ ! -f "$ORACLE_HOME/root.sh" ]; then
-        echo "ERROR: root.sh was not found:"
-        echo "$ORACLE_HOME/root.sh"
-        exit 1
-    fi
+if [ ! -f "$ORACLE_HOME/root.sh" ]; then
+    echo "ERROR: root.sh was not found:"
+    echo "$ORACLE_HOME/root.sh"
+    exit 1
+fi
 
-    # Answer the standard local-bin prompt and preserve existing helper scripts.
-    if ! "$ORACLE_HOME/root.sh" <<ROOT_SCRIPT_INPUT
+# Answer the standard local-bin prompt and preserve existing helper scripts.
+if ! "$ORACLE_HOME/root.sh" <<ROOT_SCRIPT_INPUT
 $LOCAL_BIN_DIR
 n
 n
 n
 ROOT_SCRIPT_INPUT
-    then
-        echo "ERROR: root.sh failed."
-        exit 1
-    fi
-
-    if ! touch "$ROOT_SH_MARKER"; then
-        echo "ERROR: Failed to create root.sh completion marker: $ROOT_SH_MARKER"
-        exit 1
-    fi
-
-    echo "root.sh completed successfully."
+then
+    echo "ERROR: root.sh failed."
+    exit 1
 fi
+
+if ! touch "$ROOT_SH_MARKER"; then
+    echo "ERROR: Failed to create root.sh completion marker: $ROOT_SH_MARKER"
+    exit 1
+fi
+
+echo "root.sh completed successfully."
 
 
 echo ""
@@ -1046,6 +1040,9 @@ echo ""
 if [ "$CREATE_DB" -eq 1 ]; then
     CURRENT_STAGE="database creation"
     echo "=== Create and verify the database as oracle ==="
+
+    # Credentials are written only to a private temporary directory. The
+    # cleanup trap removes these files on success, failure, or interruption.
     DBCA_TEMPLATE="$ORACLE_HOME/assistants/dbca/dbca.rsp"
     if [ ! -r "$DBCA_TEMPLATE" ]; then
         echo "ERROR: Missing DBCA response template: $DBCA_TEMPLATE"
@@ -1074,7 +1071,8 @@ if [ "$CREATE_DB" -eq 1 ]; then
         exit 1
     fi
     unset DB_PASSWORD DB_PASSWORD_RSP
-    # Only non-secret settings and the private directory path are arguments.
+    # Run Listener and DBCA work in a clean oracle-owned shell. Only non-secret
+    # settings and the private credential directory path are command arguments.
     runuser -u "$ORACLE_OWNER" -- bash --noprofile --norc -s -- \
         "$ORACLE_BASE" "$ORACLE_HOME" "$ORACLE_SID" "$LISTENER_PORT" \
         "$DB_HOST" "$DB_SERVICE" "$DATA_DIR" "$FRA_DIR" \
@@ -1100,6 +1098,9 @@ DB_UNIQUE_NAME="$ORACLE_SID"
 LISTENER_NAME="LSNR_$ORACLE_SID"
 HOST_PROFILE="$HOME/.$(hostname).profile"
 WORK_DIR=""
+
+# Remove only the temporary Listener work file. Installed Listener and database
+# files are retained when a stage fails so the DBA can inspect the result.
 cleanup_db_work() {
     if [ -n "$WORK_DIR" ]; then
         rm -f -- "$WORK_DIR/listener.ora"
@@ -1162,6 +1163,8 @@ verify_listener_endpoint() {
     return 0
 }
 
+# Database completion requires both the requested DB_NAME and READ WRITE mode.
+# A successful SQL*Plus process alone is not enough.
 verify_database_open() {
     local DATABASE_STATUS
 
@@ -1189,16 +1192,19 @@ SQL
 echo "=== Preflight: Check target database and files ==="
 LISTENER_MARKER="$TNS_ADMIN/.LSNR_${ORACLE_SID}_complete"
 DATABASE_MARKER="$ORACLE_BASE/.DB_${ORACLE_SID}_complete"
-LISTENER_REQUIRED="Y"
-DATABASE_REQUIRED="Y"
 
-for COMPLETION_MARKER in "$LISTENER_MARKER" "$DATABASE_MARKER"; do
-    if [ -L "$COMPLETION_MARKER" ] ||
-       { [ -e "$COMPLETION_MARKER" ] && [ ! -f "$COMPLETION_MARKER" ]; }; then
-        echo "ERROR: Completion marker must be a regular file: $COMPLETION_MARKER"
-        exit 1
-    fi
-done
+# Database and Listener markers prove that these deployment identifiers were
+# used before. They are conflict evidence, not permission to reuse resources.
+if [ -e "$DATABASE_MARKER" ] || [ -L "$DATABASE_MARKER" ]; then
+    echo "ERROR: Oracle SID already exists or has existing database artifacts: $ORACLE_SID"
+    echo "Use a different ORACLE_SID and rerun the installer."
+    exit 1
+fi
+if [ -e "$LISTENER_MARKER" ] || [ -L "$LISTENER_MARKER" ]; then
+    echo "ERROR: Listener already exists: $LISTENER_NAME"
+    echo "Use a different ORACLE_SID and rerun the installer."
+    exit 1
+fi
 
 if ! REGISTERED_DB=$(awk -F: -v name="$DB_NAME" '$0 !~ /^[[:space:]]*#/ && toupper($1)==name {print}' /etc/oratab); then
     exit 1
@@ -1210,113 +1216,39 @@ if ! DB_FILES=$(find "$ORACLE_HOME/dbs" -maxdepth 1 \( -iname "spfile$ORACLE_SID
     exit 1
 fi
 
-if [ -f "$DATABASE_MARKER" ]; then
-    if [ -z "$REGISTERED_DB" ]; then
-        echo "ERROR: Database marker exists, but /etc/oratab has no target database entry."
-        exit 1
-    fi
-
-    REGISTERED_COUNT=$(printf '%s\n' "$REGISTERED_DB" | awk 'NF {count++} END {print count + 0}')
-    REGISTERED_HOME=$(printf '%s\n' "$REGISTERED_DB" | awk -F: 'NF {print $2; exit}')
-    if [ "$REGISTERED_COUNT" -ne 1 ] || [ "$REGISTERED_HOME" != "$ORACLE_HOME" ]; then
-        echo "ERROR: Database marker and /etc/oratab are inconsistent for $DB_NAME."
-        exit 1
-    fi
-    if [ ! -f "$ORACLE_HOME/dbs/spfile$ORACLE_SID.ora" ]; then
-        echo "ERROR: Database marker exists, but the target spfile is missing."
-        exit 1
-    fi
-
-    if ! printf '%s\n' "$PROCESSES" | grep -Eiq "^ora_pmon_$ORACLE_SID([[:space:]]|$)"; then
-        echo "Target database is stopped. Starting the completed database for verification."
-        if ! "$ORACLE_HOME/bin/sqlplus" -L -s / as sysdba <<'SQL'
-WHENEVER OSERROR EXIT FAILURE
-WHENEVER SQLERROR EXIT FAILURE
-STARTUP;
-EXIT SUCCESS
-SQL
-        then
-            echo "ERROR: Database marker exists, but the target database could not be started."
-            exit 1
-        fi
-    fi
-
-    if ! verify_database_open; then
-        echo "ERROR: Completed database verification failed."
-        exit 1
-    fi
-
-    DATABASE_REQUIRED="N"
-    echo "Database already completed and verified. Skip DBCA."
-else
-    if [ -n "$REGISTERED_DB" ] ||
-       printf '%s\n' "$PROCESSES" | grep -Eiq "^ora_pmon_$ORACLE_SID([[:space:]]|$)"; then
-        echo "ERROR: Target database exists without its completion marker. Review it before retrying."
-        exit 1
-    fi
-    if [ -n "$DB_FILES" ]; then
-        echo "ERROR: Target database files exist without its completion marker: $DB_FILES"
-        exit 1
-    fi
-
-    for ROOT_DIR in "$DATA_DIR" "$FRA_DIR"; do
-        if [[ "$ROOT_DIR" != /* ]] || [ "$ROOT_DIR" = / ] || [ -L "$ROOT_DIR/$DB_UNIQUE_NAME" ]; then
-            echo "ERROR: Use an absolute storage root and no symlink for the target database directory."
-            exit 1
-        fi
-        if [ -e "$ROOT_DIR" ]; then
-            if [ ! -d "$ROOT_DIR" ] || [ ! -r "$ROOT_DIR" ] || [ ! -x "$ROOT_DIR" ]; then
-                echo "ERROR: Cannot inspect $ROOT_DIR"
-                exit 1
-            fi
-            if ! DB_FILES=$(find "$ROOT_DIR" -mindepth 1 -maxdepth 1 -iname "$DB_UNIQUE_NAME" -print); then
-                exit 1
-            fi
-            if [ -n "$DB_FILES" ]; then
-                echo "ERROR: Target database directory exists without its completion marker: $DB_FILES"
-                exit 1
-            fi
-        fi
-    done
+# Main repeats the conflict checks immediately before resource creation. This
+# second layer protects against state changes after the mandatory PreCheck.
+if [ -n "$REGISTERED_DB" ] ||
+   printf '%s\n' "$PROCESSES" | grep -Eiq "^ora_pmon_$ORACLE_SID([[:space:]]|$)" ||
+   [ -n "$DB_FILES" ]; then
+    echo "ERROR: Oracle SID already exists or has existing database artifacts: $ORACLE_SID"
+    echo "Use a different ORACLE_SID and rerun the installer."
+    exit 1
 fi
+
+for ROOT_DIR in "$DATA_DIR" "$FRA_DIR"; do
+    if [[ "$ROOT_DIR" != /* ]] || [ "$ROOT_DIR" = / ]; then
+        echo "ERROR: Use an absolute storage root other than /."
+        exit 1
+    fi
+    if [ -L "$ROOT_DIR/$DB_UNIQUE_NAME" ] || [ -e "$ROOT_DIR/$DB_UNIQUE_NAME" ]; then
+        echo "ERROR: Oracle SID already exists or has existing database artifacts: $ORACLE_SID"
+        echo "Use a different ORACLE_SID and rerun the installer."
+        exit 1
+    fi
+    if [ -e "$ROOT_DIR" ] &&
+       { [ ! -d "$ROOT_DIR" ] || [ ! -r "$ROOT_DIR" ] || [ ! -x "$ROOT_DIR" ]; }; then
+        echo "ERROR: Cannot inspect storage root: $ROOT_DIR"
+        exit 1
+    fi
+done
 
 echo "=== Preflight: Check dedicated Listener and port ==="
 LISTENER_FILE="$TNS_ADMIN/listener.ora"
 CONFIG=""
-if [ -f "$LISTENER_MARKER" ]; then
-    if [ ! -f "$LISTENER_FILE" ] || [ ! -r "$LISTENER_FILE" ]; then
-        echo "ERROR: Listener marker exists, but the Listener configuration is unavailable."
-        exit 1
-    fi
-    if ! CONFIG=$(sed 's/#.*//' "$LISTENER_FILE"); then
-        exit 1
-    fi
-    if printf '%s\n' "$CONFIG" | grep -Eiq '^[[:space:]]*IFILE[[:space:]]*='; then
-        echo "ERROR: Review included Listener configuration manually before using this simple script."
-        exit 1
-    fi
-    if ! printf '%s\n' "$CONFIG" | grep -Eiq "^[[:space:]]*$LISTENER_NAME[[:space:]]*=" ||
-       ! printf '%s\n' "$CONFIG" | tr -d '[:space:]' | grep -Fiq "(HOST=$DB_HOST)(PORT=$LISTENER_PORT)"; then
-        echo "ERROR: Listener marker and Listener configuration are inconsistent."
-        exit 1
-    fi
-
-    if ! "$ORACLE_HOME/bin/lsnrctl" status "$LISTENER_NAME" >/dev/null 2>&1; then
-        echo "Target Listener is stopped. Starting the completed Listener for verification."
-        if ! "$ORACLE_HOME/bin/lsnrctl" start "$LISTENER_NAME"; then
-            echo "ERROR: Listener marker exists, but the target Listener could not be started."
-            exit 1
-        fi
-    fi
-
-    if ! verify_listener_endpoint; then
-        echo "ERROR: Listener marker and active Listener endpoint are inconsistent."
-        exit 1
-    fi
-
-    LISTENER_REQUIRED="N"
-    echo "Listener already completed and verified. Skip creation."
-elif [ -e "$LISTENER_FILE" ]; then
+if [ -e "$LISTENER_FILE" ]; then
+    # Existing unrelated Listener entries are preserved. The requested name is
+    # new-install identity and must not already appear in listener.ora.
     if [ ! -r "$LISTENER_FILE" ]; then
         echo "ERROR: Cannot read $LISTENER_FILE"
         exit 1
@@ -1328,25 +1260,26 @@ elif [ -e "$LISTENER_FILE" ]; then
         echo "ERROR: Review included Listener configuration manually before using this simple script."
         exit 1
     fi
-    if printf '%s\n' "$CONFIG" | grep -Eiq "^[[:space:]]*$LISTENER_NAME[[:space:]]*=" ||
-       printf '%s\n' "$CONFIG" | tr -d '[:space:]' | grep -Eiq "\\(PORT=0*$LISTENER_PORT\\)"; then
-        echo "ERROR: Listener name or port is configured without its completion marker. Review it before retrying."
+    if printf '%s\n' "$CONFIG" | grep -Eiq "^[[:space:]]*$LISTENER_NAME[[:space:]]*="; then
+        echo "ERROR: Listener already exists: $LISTENER_NAME"
+        echo "Use a different ORACLE_SID and rerun the installer."
         exit 1
     fi
 fi
-if [ "$LISTENER_REQUIRED" = "Y" ] &&
-   printf '%s\n' "$PROCESSES" | grep -Eiq "(^|/)tnslsnr[[:space:]]+$LISTENER_NAME([[:space:]]|$)"; then
-    echo "ERROR: Target Listener is already running."
+if printf '%s\n' "$PROCESSES" | grep -Eiq "(^|/)tnslsnr[[:space:]]+$LISTENER_NAME([[:space:]]|$)" ||
+   "$ORACLE_HOME/bin/lsnrctl" status "$LISTENER_NAME" >/dev/null 2>&1; then
+    echo "ERROR: Listener already exists: $LISTENER_NAME"
+    echo "Use a different ORACLE_SID and rerun the installer."
     exit 1
 fi
-if [ "$LISTENER_REQUIRED" = "Y" ]; then
-    if ! SOCKETS=$(ss -H -ltn); then
-        exit 1
-    fi
-    if printf '%s\n' "$SOCKETS" | awk '{print $4}' | grep -Eq ":$LISTENER_PORT$"; then
-        echo "ERROR: TCP port $LISTENER_PORT is in use."
-        exit 1
-    fi
+if ! SOCKETS=$(ss -H -ltn); then
+    echo "ERROR: Cannot inspect listening TCP ports."
+    exit 1
+fi
+if printf '%s\n' "$SOCKETS" | awk '{print $4}' | grep -Eq ":$LISTENER_PORT$"; then
+    echo "ERROR: Listener port is already in use: $LISTENER_PORT"
+    echo "Use an unused LISTENER_PORT and rerun the installer."
+    exit 1
 fi
 
 if ! mkdir -p "$DATA_DIR" "$FRA_DIR"; then
@@ -1357,98 +1290,99 @@ echo "Database: $DB_NAME; Listener: $LISTENER_NAME:$LISTENER_PORT"
 echo "DATA: $DATA_DIR/$DB_UNIQUE_NAME; FRA: $FRA_DIR/$DB_UNIQUE_NAME"
 
 echo "=== 2. Create and start dedicated Listener ==="
-if [ "$LISTENER_REQUIRED" = "Y" ]; then
-    if ! mkdir -p "$TNS_ADMIN"; then
-        exit 1
-    fi
-    # Preserve the first listener configuration backup.
-    LISTENER_BACKUP="$LISTENER_FILE.pre_create.bak"
-    if [ -f "$LISTENER_FILE" ] && [ ! -e "$LISTENER_BACKUP" ]; then
-        if ! cp -p "$LISTENER_FILE" "$LISTENER_BACKUP"; then
-            echo "ERROR: Cannot back up the Listener configuration."
-            exit 1
-        fi
-    fi
-    if ! WORK_DIR=$(mktemp -d "$TNS_ADMIN/.create_db.XXXXXX"); then
-        exit 1
-    fi
-    if [ -f "$LISTENER_FILE" ]; then
-        if ! cp -p "$LISTENER_FILE" "$WORK_DIR/listener.ora"; then
-            exit 1
-        fi
-    else
-        if ! : > "$WORK_DIR/listener.ora" || ! chmod 640 "$WORK_DIR/listener.ora"; then
-            exit 1
-        fi
-    fi
-    if ! printf '\n%s =\n  (DESCRIPTION_LIST =\n    (DESCRIPTION =\n      (ADDRESS = (PROTOCOL = TCP)(HOST = %s)(PORT = %s))\n    )\n  )\n' \
-        "$LISTENER_NAME" "$DB_HOST" "$LISTENER_PORT" >> "$WORK_DIR/listener.ora"; then
-        echo "ERROR: Cannot prepare the dedicated Listener configuration."
-        exit 1
-    fi
-    if ! mv "$WORK_DIR/listener.ora" "$LISTENER_FILE"; then
-        echo "ERROR: Cannot install the dedicated Listener configuration."
-        exit 1
-    fi
-    if ! "$ORACLE_HOME/bin/lsnrctl" start "$LISTENER_NAME"; then
-        echo "ERROR: Failed to start the target Listener. Review $LISTENER_FILE before retrying."
-        exit 1
-    fi
-
-    if ! verify_listener_endpoint; then
-        echo "ERROR: Listener endpoint verification failed after creation."
-        exit 1
-    fi
-    if ! touch "$LISTENER_MARKER"; then
-        echo "ERROR: Failed to create Listener completion marker: $LISTENER_MARKER"
-        exit 1
-    fi
-    echo "Listener creation completed successfully."
+if ! mkdir -p "$TNS_ADMIN"; then
+    exit 1
 fi
+# Preserve the first Listener configuration backup. Build the new file in
+# the same directory, verify it, and only then record completion.
+LISTENER_BACKUP="$LISTENER_FILE.pre_create.bak"
+if [ -f "$LISTENER_FILE" ] && [ ! -e "$LISTENER_BACKUP" ]; then
+    if ! cp -p "$LISTENER_FILE" "$LISTENER_BACKUP"; then
+        echo "ERROR: Cannot back up the Listener configuration."
+        exit 1
+    fi
+fi
+if ! WORK_DIR=$(mktemp -d "$TNS_ADMIN/.create_db.XXXXXX"); then
+    exit 1
+fi
+if [ -f "$LISTENER_FILE" ]; then
+    if ! cp -p "$LISTENER_FILE" "$WORK_DIR/listener.ora"; then
+        exit 1
+    fi
+else
+    if ! : > "$WORK_DIR/listener.ora" || ! chmod 640 "$WORK_DIR/listener.ora"; then
+        exit 1
+    fi
+fi
+if ! printf '\n%s =\n  (DESCRIPTION_LIST =\n    (DESCRIPTION =\n      (ADDRESS = (PROTOCOL = TCP)(HOST = %s)(PORT = %s))\n    )\n  )\n' \
+    "$LISTENER_NAME" "$DB_HOST" "$LISTENER_PORT" >> "$WORK_DIR/listener.ora"; then
+    echo "ERROR: Cannot prepare the dedicated Listener configuration."
+    exit 1
+fi
+if ! mv "$WORK_DIR/listener.ora" "$LISTENER_FILE"; then
+    echo "ERROR: Cannot install the dedicated Listener configuration."
+    exit 1
+fi
+if ! "$ORACLE_HOME/bin/lsnrctl" start "$LISTENER_NAME"; then
+    echo "ERROR: Failed to start the target Listener. Review $LISTENER_FILE before retrying."
+    exit 1
+fi
+
+if ! verify_listener_endpoint; then
+    echo "ERROR: Listener endpoint verification failed after creation."
+    exit 1
+fi
+if ! touch "$LISTENER_MARKER"; then
+    echo "ERROR: Failed to create Listener completion marker: $LISTENER_MARKER"
+    exit 1
+fi
+echo "Listener creation completed successfully."
 
 echo "=== 3. Create Database with DBCA ==="
-if [ "$DATABASE_REQUIRED" = "Y" ]; then
-    "$ORACLE_HOME/bin/dbca" -silent -createDatabase -responseFile "$DB_SECRET_DIR/dbca.rsp" \
-        -templateName General_Purpose.dbc \
-        -gdbName "$DB_NAME" -sid "$ORACLE_SID" \
-        -initParams "db_unique_name=$DB_UNIQUE_NAME" \
-        -databaseConfigType SINGLE -createAsContainerDatabase false \
-        -databaseType MULTIPURPOSE -storageType FS -useOMF true \
-        -datafileDestination "$DATA_DIR" \
-        -recoveryAreaDestination "$FRA_DIR" -recoveryAreaSize "$FRA_SIZE_MB" \
-        -characterSet "$CHARACTER_SET" -nationalCharacterSet "$NATIONAL_CHARACTER_SET" \
-        -memoryMgmtType AUTO_SGA -totalMemory "$TOTAL_MEMORY_MB" \
-        -listeners "$LISTENER_NAME" \
-        -enableArchive false -emConfiguration NONE -sampleSchema false </dev/null
+# DBCA failure is intentionally not cleaned up automatically. Any generated
+# datafiles, logs, or oratab entry must be reviewed before another attempt.
+"$ORACLE_HOME/bin/dbca" -silent -createDatabase -responseFile "$DB_SECRET_DIR/dbca.rsp" \
+    -templateName General_Purpose.dbc \
+    -gdbName "$DB_NAME" -sid "$ORACLE_SID" \
+    -initParams "db_unique_name=$DB_UNIQUE_NAME" \
+    -databaseConfigType SINGLE -createAsContainerDatabase false \
+    -databaseType MULTIPURPOSE -storageType FS -useOMF true \
+    -datafileDestination "$DATA_DIR" \
+    -recoveryAreaDestination "$FRA_DIR" -recoveryAreaSize "$FRA_SIZE_MB" \
+    -characterSet "$CHARACTER_SET" -nationalCharacterSet "$NATIONAL_CHARACTER_SET" \
+    -memoryMgmtType AUTO_SGA -totalMemory "$TOTAL_MEMORY_MB" \
+    -listeners "$LISTENER_NAME" \
+    -enableArchive false -emConfiguration NONE -sampleSchema false </dev/null
 
-    DBCA_RC=$?
-    if [ "$DBCA_RC" -ne 0 ]; then
-        echo "ERROR: DBCA returned $DBCA_RC. Review $ORACLE_BASE/cfgtoollogs/dbca/$DB_NAME."
-        echo "Existing files are retained. No automatic retry or cleanup was performed."
-        exit "$DBCA_RC"
-    fi
-
-    if ! REGISTERED_HOME=$(awk -F: -v name="$DB_NAME" '$0 !~ /^[[:space:]]*#/ && toupper($1)==name {print $2; exit}' /etc/oratab) ||
-       [ "$REGISTERED_HOME" != "$ORACLE_HOME" ]; then
-        echo "ERROR: DBCA succeeded, but /etc/oratab does not match the target Oracle Home."
-        exit 1
-    fi
-    if [ ! -f "$ORACLE_HOME/dbs/spfile$ORACLE_SID.ora" ]; then
-        echo "ERROR: DBCA succeeded, but the target spfile is missing."
-        exit 1
-    fi
-    if ! verify_database_open; then
-        echo "ERROR: DBCA completed, but database verification failed."
-        exit 1
-    fi
-    if ! touch "$DATABASE_MARKER"; then
-        echo "ERROR: Failed to create database completion marker: $DATABASE_MARKER"
-        exit 1
-    fi
-    echo "Database creation completed successfully."
+DBCA_RC=$?
+if [ "$DBCA_RC" -ne 0 ]; then
+    echo "ERROR: DBCA returned $DBCA_RC. Review $ORACLE_BASE/cfgtoollogs/dbca/$DB_NAME."
+    echo "Existing files are retained. No automatic retry or cleanup was performed."
+    exit "$DBCA_RC"
 fi
+
+if ! REGISTERED_HOME=$(awk -F: -v name="$DB_NAME" '$0 !~ /^[[:space:]]*#/ && toupper($1)==name {print $2; exit}' /etc/oratab) ||
+   [ "$REGISTERED_HOME" != "$ORACLE_HOME" ]; then
+    echo "ERROR: DBCA succeeded, but /etc/oratab does not match the target Oracle Home."
+    exit 1
+fi
+if [ ! -f "$ORACLE_HOME/dbs/spfile$ORACLE_SID.ora" ]; then
+    echo "ERROR: DBCA succeeded, but the target spfile is missing."
+    exit 1
+fi
+if ! verify_database_open; then
+    echo "ERROR: DBCA completed, but database verification failed."
+    exit 1
+fi
+# Create the database marker only after oratab, spfile, DB_NAME, and
+# READ WRITE mode have all been verified.
+if ! touch "$DATABASE_MARKER"; then
+    echo "ERROR: Failed to create database completion marker: $DATABASE_MARKER"
+    exit 1
+fi
+echo "Database creation completed successfully."
 echo "=== 4-5. Set LOCAL_LISTENER and register ==="
-# Use an explicit address for both default and custom ports to remove stale aliases.
+# Use an explicit address for both default and custom ports to avoid stale aliases.
 if ! "$ORACLE_HOME/bin/sqlplus" -L -s / as sysdba <<SQL
 WHENEVER OSERROR EXIT FAILURE
 WHENEVER SQLERROR EXIT FAILURE
@@ -1465,6 +1399,8 @@ fi
 
 echo "Configure $TNS_ADMIN/tnsnames.ora manually if a local TNS alias is required."
 echo "=== 6. Set host profile ==="
+# The host-specific profile contains SID identity only. ORACLE_HOME and PATH
+# remain in .oracle_env so the profile load direction stays one-way.
 if ! cat > "$HOST_PROFILE" <<EOF; then
 export ORACLE_SID="$ORACLE_SID"
 DB_NAME="$ORACLE_SID"
@@ -1490,6 +1426,9 @@ ORACLE_DATABASE_SCRIPT
         echo "ERROR: Database stage failed with status $DB_RESULT. Review the stage output before continuing manually."
         exit "$DB_RESULT"
     fi
+
+    # PostCheck is a separate read-only gate. Credential files are retained
+    # until Easy Connect verification finishes, then removed immediately.
     CURRENT_STAGE="post-install health check"
     POSTCHECK_SCRIPT="$SCRIPT_DIR/oracle_linux_7_8_19c_postcheck.sh"
     if [ -L "$POSTCHECK_SCRIPT" ] || [ ! -f "$POSTCHECK_SCRIPT" ]; then

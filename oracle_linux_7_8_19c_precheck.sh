@@ -1,6 +1,13 @@
 #!/bin/bash
 
 # Read-only pre-install checks for Oracle Linux 7 / 8 and Oracle Database 19c.
+#
+# Result policy for Main or a DBA:
+#   PASS = requirement is currently satisfied.
+#   WARN = Main can create or change the expected new-server state.
+#   FAIL = installation must stop for correction or DBA review.
+# This script never installs packages, edits files, starts services, or creates
+# Oracle resources. It exits 1 when at least one FAIL is recorded.
 
 if ! SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; then
     echo "FAIL: Cannot determine the script directory."
@@ -18,15 +25,9 @@ if ! . "$CONFIG_FILE"; then
     exit 1
 fi
 
-if [ -z "${PACKAGE_NAME:-}" ] || [ -z "${PREINSTALL_SYSCTL:-}" ] ||
-   [ -z "${CUSTOM_SYSCTL:-}" ] || [ -z "${LIMITS_FILE:-}" ] ||
-   [ -z "${SELINUX_CONFIG:-}" ] || [ -z "${TIMEZONE:-}" ] ||
-   [ -z "${SOFTWARE_SOURCE_DIR:-}" ] || [ -z "${ZIP_FILE:-}" ] ||
-   [ -z "${ORACLE_BASE:-}" ] || [ -z "${ORACLE_HOME:-}" ] ||
-   [ -z "${ORA_INVENTORY:-}" ] || [ -z "${ORAINST_FILE:-}" ] ||
-   [ -z "${ORACLE_OWNER:-}" ] || [ -z "${ORACLE_GROUP:-}" ] ||
-   [ -z "${DATA_DIR:-}" ] || [ -z "${FRA_DIR:-}" ]; then
-    echo "FAIL: Required settings are missing from: $CONFIG_FILE"
+if [ -z "${ORACLE_HOME:-}" ] || [ -z "${ORA_INVENTORY:-}" ] ||
+   [ -z "${ORAINST_FILE:-}" ]; then
+    echo "FAIL: Oracle Home or Inventory settings are missing from: $CONFIG_FILE"
     exit 1
 fi
 
@@ -34,21 +35,22 @@ EXTRACT_MARKER="$ORACLE_HOME/.oracle_19c_extraction_complete"
 INSTALL_MARKER="$ORACLE_HOME/.oracle_19c_installer_complete"
 ORAINST_ROOT_MARKER="$ORA_INVENTORY/.orainstRoot_complete"
 ROOT_SH_MARKER="$ORACLE_HOME/.root_sh_complete"
-DB_HOST="$(hostname -f 2>/dev/null)"
+
+# Fixed paths come from oracle_install.conf. SID and Listener port are runtime
+# deployment identifiers and are accepted only through explicit arguments.
+DB_HOST=""
 DB_SERVICE=""
 CREATE_DB=0
+TARGET_ONLY=0
 ORACLE_SID=""
 LISTENER_PORT=""
 PASS_COUNT=0
 WARN_COUNT=0
 FAIL_COUNT=0
+
 OS_MAJOR=""
 PACKAGE_INSTALLED=0
 ORACLE_USER_EXISTS=0
-EXTRACT_COMPLETE=0
-INSTALL_COMPLETE=0
-ORAINST_ROOT_COMPLETE=0
-ROOT_SH_COMPLETE=0
 INVENTORY_DECLARED=0
 TMP_MINIMUM_MB=1024
 ORACLE_SOFTWARE_MINIMUM_MB=7373
@@ -58,6 +60,11 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --create-db)
             CREATE_DB=1
+            shift
+            ;;
+        --target-only)
+            CREATE_DB=1
+            TARGET_ONLY=1
             shift
             ;;
         --sid)
@@ -78,6 +85,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         --help)
             echo "Usage: $0 [--create-db --sid SID --listener-port PORT]"
+            echo "       $0 --target-only --sid SID --listener-port PORT"
             exit 0
             ;;
         *)
@@ -87,6 +95,102 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+# Oracle Software is the first stopping condition. Do not inspect root scripts,
+# Listener, Database, Profile, or PostCheck after installed software is found.
+if ! command -v grep >/dev/null 2>&1; then
+    echo "FAIL: Required command is missing: grep"
+    echo "PRECHECK RESULT: FAIL"
+    exit 1
+fi
+
+SOFTWARE_INVENTORY="$ORA_INVENTORY"
+if [ -L "$ORAINST_FILE" ] ||
+   { [ -e "$ORAINST_FILE" ] && [ ! -f "$ORAINST_FILE" ]; }; then
+    echo "FAIL: oraInst.loc must be a regular file: $ORAINST_FILE"
+    echo "PRECHECK RESULT: FAIL"
+    exit 1
+elif [ -f "$ORAINST_FILE" ]; then
+    if ! command -v sed >/dev/null 2>&1; then
+        echo "FAIL: Required command is missing: sed"
+        echo "PRECHECK RESULT: FAIL"
+        exit 1
+    fi
+    SOFTWARE_INVENTORY="$(sed -n 's/^inventory_loc=//p' "$ORAINST_FILE")"
+    if [ -z "$SOFTWARE_INVENTORY" ]; then
+        echo "FAIL: oraInst.loc is missing inventory_loc: $ORAINST_FILE"
+        echo "PRECHECK RESULT: FAIL"
+        exit 1
+    fi
+fi
+
+SOFTWARE_INVENTORY_FILE="$SOFTWARE_INVENTORY/ContentsXML/inventory.xml"
+if [ -e "$INSTALL_MARKER" ] || [ -L "$INSTALL_MARKER" ] ||
+   { [ -f "$SOFTWARE_INVENTORY_FILE" ] &&
+     grep -Fq "LOC=\"$ORACLE_HOME\"" "$SOFTWARE_INVENTORY_FILE"; }; then
+    echo "FAIL: Oracle Software is already installed: $ORACLE_HOME"
+    echo "PRECHECK RESULT: FAIL"
+    exit 1
+fi
+
+# Partial software state also stops before unrelated prerequisite checks.
+for PARTIAL_MARKER in "$EXTRACT_MARKER" "$ORAINST_ROOT_MARKER" "$ROOT_SH_MARKER"; do
+    if [ -e "$PARTIAL_MARKER" ] || [ -L "$PARTIAL_MARKER" ]; then
+        echo "FAIL: Existing completion marker requires DBA review: $PARTIAL_MARKER"
+        echo "PRECHECK RESULT: FAIL"
+        exit 1
+    fi
+done
+
+if [ -L "$ORACLE_HOME" ] || { [ -e "$ORACLE_HOME" ] && [ ! -d "$ORACLE_HOME" ]; }; then
+    echo "FAIL: Oracle Home must be a normal directory: $ORACLE_HOME"
+    echo "PRECHECK RESULT: FAIL"
+    exit 1
+elif [ -d "$ORACLE_HOME" ]; then
+    if ! command -v find >/dev/null 2>&1; then
+        echo "FAIL: Required command is missing: find"
+        echo "PRECHECK RESULT: FAIL"
+        exit 1
+    fi
+    FIRST_HOME_ENTRY="$(find "$ORACLE_HOME" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)"
+    if [ -n "$FIRST_HOME_ENTRY" ]; then
+        echo "FAIL: Oracle Home is not empty: $ORACLE_HOME"
+        echo "PRECHECK RESULT: FAIL"
+        exit 1
+    fi
+fi
+
+if [ "$TARGET_ONLY" -eq 1 ]; then
+    if [ -z "${ORACLE_BASE:-}" ] || [ -z "${ORACLE_OWNER:-}" ] ||
+       [ -z "${DATA_DIR:-}" ] || [ -z "${FRA_DIR:-}" ]; then
+        echo "FAIL: Database target settings are missing from: $CONFIG_FILE"
+        echo "PRECHECK RESULT: FAIL"
+        exit 1
+    fi
+else
+    if [ -z "${PACKAGE_NAME:-}" ] || [ -z "${PREINSTALL_SYSCTL:-}" ] ||
+       [ -z "${CUSTOM_SYSCTL:-}" ] || [ -z "${LIMITS_FILE:-}" ] ||
+       [ -z "${SELINUX_CONFIG:-}" ] || [ -z "${TIMEZONE:-}" ] ||
+       [ -z "${SOFTWARE_SOURCE_DIR:-}" ] || [ -z "${ZIP_FILE:-}" ] ||
+       [ -z "${ORACLE_BASE:-}" ] || [ -z "${ORACLE_OWNER:-}" ] ||
+       [ -z "${ORACLE_GROUP:-}" ] || [ -z "${DATA_DIR:-}" ] ||
+       [ -z "${FRA_DIR:-}" ]; then
+        echo "FAIL: Required settings are missing from: $CONFIG_FILE"
+        echo "PRECHECK RESULT: FAIL"
+        exit 1
+    fi
+fi
+
+DB_HOST="$(hostname -f 2>/dev/null)"
+
+if [ "$CREATE_DB" -eq 1 ] &&
+   { [ -z "$ORACLE_SID" ] || [ -z "$LISTENER_PORT" ]; }; then
+    echo "FAIL: Database target checks require --sid and --listener-port."
+    echo "PRECHECK RESULT: FAIL"
+    exit 1
+fi
+
+if [ "$TARGET_ONLY" -eq 0 ]; then
+
 echo "========================================"
 echo " Oracle Linux 7 / 8 and Oracle 19c Precheck"
 echo "========================================"
@@ -94,6 +198,8 @@ echo "========================================"
 echo ""
 echo "=== Identity and platform ==="
 
+# These checks identify conditions Main cannot safely correct during an Oracle
+# installation, such as the wrong OS family, architecture, or hostname.
 if [ "$(id -u)" -eq 0 ]; then
     echo "PASS: Running as root."
     PASS_COUNT=$((PASS_COUNT + 1))
@@ -136,7 +242,7 @@ else
     FAIL_COUNT=$((FAIL_COUNT + 1))
 fi
 
-for REQUIRED_COMMAND in awk df dirname find free getenforce getent grep hostname id ps rpm runuser sed sort ss stat sysctl systemctl timedatectl tr uname; do
+for REQUIRED_COMMAND in awk df dirname find free getenforce getent grep hostname id rpm runuser sed sort stat sysctl systemctl timedatectl tr uname; do
     if command -v "$REQUIRED_COMMAND" >/dev/null 2>&1; then
         echo "PASS: Required command is available: $REQUIRED_COMMAND"
         PASS_COUNT=$((PASS_COUNT + 1))
@@ -146,7 +252,8 @@ for REQUIRED_COMMAND in awk df dirname find free getenforce getent grep hostname
     fi
 done
 
-# Check the running kernel against Oracle Database 19c documented minimums.
+# Compare the running kernel with the documented minimum for its recognized
+# OL7/OL8 UEK or RHCK family. Unknown newer families remain a DBA warning.
 KERNEL_RELEASE=""
 KERNEL_FAMILY=""
 MINIMUM_KERNEL=""
@@ -228,6 +335,8 @@ fi
 echo ""
 echo "=== Package and operating system settings ==="
 
+# A missing preinstall package is a warning only when yum can provide it,
+# because Main owns the package installation step on a new server.
 if rpm -q "$PACKAGE_NAME" >/dev/null 2>&1; then
     PACKAGE_INSTALLED=1
     echo "PASS: Package is installed: $PACKAGE_NAME"
@@ -333,6 +442,8 @@ fi
 echo ""
 echo "=== Memory and filesystem resources ==="
 
+# Memory and Swap are installation gates. Report actual values so the DBA can
+# compare the host allocation with the Oracle recommendation.
 if MEM_KB="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)" &&
    SWAP_KB="$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo)" &&
    [ -n "$MEM_KB" ] && [ -n "$SWAP_KB" ]; then
@@ -429,6 +540,8 @@ done
 echo ""
 echo "=== Oracle installation state ==="
 
+# oraInst.loc is authoritative when it already exists. PreCheck verifies the
+# declaration but never changes the Inventory path, group, or permissions.
 INVENTORY_GROUP="$ORACLE_GROUP"
 if [ -L "$ORAINST_FILE" ] ||
    { [ -e "$ORAINST_FILE" ] && [ ! -f "$ORAINST_FILE" ]; }; then
@@ -454,44 +567,14 @@ else
     WARN_COUNT=$((WARN_COUNT + 1))
 fi
 
-INVENTORY_FILE="$ORA_INVENTORY/ContentsXML/inventory.xml"
-for COMPLETION_MARKER in "$EXTRACT_MARKER" "$INSTALL_MARKER" \
-    "$ORAINST_ROOT_MARKER" "$ROOT_SH_MARKER"; do
-    if [ -L "$COMPLETION_MARKER" ] ||
-       { [ -e "$COMPLETION_MARKER" ] && [ ! -f "$COMPLETION_MARKER" ]; }; then
-        echo "FAIL: Completion marker must be a regular file: $COMPLETION_MARKER"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
-    fi
-done
-
-if [ -f "$EXTRACT_MARKER" ] && [ ! -L "$EXTRACT_MARKER" ]; then
-    EXTRACT_COMPLETE=1
-fi
-
-if [ -f "$INSTALL_MARKER" ] && [ ! -L "$INSTALL_MARKER" ]; then
-    if ! IFS= read -r INSTALL_BATCH_ID < "$INSTALL_MARKER" ||
-       [ -z "$INSTALL_BATCH_ID" ]; then
-        echo "FAIL: Installer completion marker has no installation batch ID: $INSTALL_MARKER"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
-    elif [ -f "$INVENTORY_FILE" ] && grep -Fq "LOC=\"$ORACLE_HOME\"" "$INVENTORY_FILE"; then
-        INSTALL_COMPLETE=1
-        echo "PASS: Installer marker and Inventory registration are consistent."
-        PASS_COUNT=$((PASS_COUNT + 1))
-    else
-        echo "FAIL: Installer marker exists without matching Inventory registration."
-        FAIL_COUNT=$((FAIL_COUNT + 1))
-    fi
-elif [ -f "$INVENTORY_FILE" ] && grep -Fq "LOC=\"$ORACLE_HOME\"" "$INVENTORY_FILE"; then
-    echo "FAIL: Oracle Home is registered but the installer completion marker is missing."
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-else
-    echo "WARN: Oracle software installation has not completed."
-    WARN_COUNT=$((WARN_COUNT + 1))
-fi
+echo "PASS: Oracle Software is not installed in the target Oracle Home."
+PASS_COUNT=$((PASS_COUNT + 1))
 
 echo ""
 echo "--- Oracle Home filesystem capacity ---"
 
+# Walk upward to the nearest existing path so a new ORACLE_HOME can still be
+# checked against the filesystem that will contain it.
 ORACLE_HOME_CHECK_PATH="$ORACLE_HOME"
 while [ ! -e "$ORACLE_HOME_CHECK_PATH" ]; do
     PARENT_PATH="$(dirname "$ORACLE_HOME_CHECK_PATH")"
@@ -505,9 +588,7 @@ ORACLE_HOME_AVAILABLE_MB="$(df -Pm "$ORACLE_HOME_CHECK_PATH" 2>/dev/null | awk '
 if [[ "$ORACLE_HOME_AVAILABLE_MB" =~ ^[0-9]+$ ]]; then
     echo "INFO: Oracle Home filesystem available space is $ORACLE_HOME_AVAILABLE_MB MB."
     echo "INFO: Filesystem check path: $ORACLE_HOME_CHECK_PATH"
-    # Require 7.2 GB only before Oracle Home extraction.
-    if [ "$EXTRACT_COMPLETE" -eq 0 ] &&
-       [ "$ORACLE_HOME_AVAILABLE_MB" -lt "$ORACLE_SOFTWARE_MINIMUM_MB" ]; then
+    if [ "$ORACLE_HOME_AVAILABLE_MB" -lt "$ORACLE_SOFTWARE_MINIMUM_MB" ]; then
         echo "FAIL: Oracle Home filesystem must have at least 7.2 GB available before extraction."
         FAIL_COUNT=$((FAIL_COUNT + 1))
     elif [ "$ORACLE_HOME_AVAILABLE_MB" -lt "$ORACLE_SOFTWARE_RECOMMENDED_MB" ]; then
@@ -520,41 +601,6 @@ if [[ "$ORACLE_HOME_AVAILABLE_MB" =~ ^[0-9]+$ ]]; then
 else
     echo "FAIL: Cannot determine available space for Oracle Home: $ORACLE_HOME"
     FAIL_COUNT=$((FAIL_COUNT + 1))
-fi
-
-if [ "$INSTALL_COMPLETE" -eq 1 ] && [ "$EXTRACT_COMPLETE" -eq 0 ]; then
-    echo "FAIL: Installer completion is recorded but the extraction marker is missing."
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-fi
-
-if [ -f "$ORAINST_ROOT_MARKER" ] && [ ! -L "$ORAINST_ROOT_MARKER" ]; then
-    if [ "$INSTALL_COMPLETE" -eq 1 ]; then
-        ORAINST_ROOT_COMPLETE=1
-        echo "PASS: orainstRoot.sh completion marker is present."
-        PASS_COUNT=$((PASS_COUNT + 1))
-    else
-        echo "FAIL: orainstRoot.sh marker exists before installer completion is verified."
-        FAIL_COUNT=$((FAIL_COUNT + 1))
-    fi
-elif [ ! -e "$ORAINST_ROOT_MARKER" ] && [ ! -L "$ORAINST_ROOT_MARKER" ] &&
-     [ "$INSTALL_COMPLETE" -eq 1 ]; then
-    echo "WARN: orainstRoot.sh has not completed; the installer will resume this stage."
-    WARN_COUNT=$((WARN_COUNT + 1))
-fi
-
-if [ -f "$ROOT_SH_MARKER" ] && [ ! -L "$ROOT_SH_MARKER" ]; then
-    if [ "$INSTALL_COMPLETE" -eq 1 ] && [ "$ORAINST_ROOT_COMPLETE" -eq 1 ]; then
-        ROOT_SH_COMPLETE=1
-        echo "PASS: root.sh completion marker is present."
-        PASS_COUNT=$((PASS_COUNT + 1))
-    else
-        echo "FAIL: root.sh marker exists before earlier software stages are complete."
-        FAIL_COUNT=$((FAIL_COUNT + 1))
-    fi
-elif [ ! -e "$ROOT_SH_MARKER" ] && [ ! -L "$ROOT_SH_MARKER" ] &&
-     [ "$ORAINST_ROOT_COMPLETE" -eq 1 ]; then
-    echo "WARN: root.sh has not completed; the installer will resume this stage."
-    WARN_COUNT=$((WARN_COUNT + 1))
 fi
 
 for ORACLE_DIR in "$SOFTWARE_SOURCE_DIR" "$ORACLE_BASE" "$ORACLE_HOME" "$ORA_INVENTORY"; do
@@ -598,30 +644,17 @@ if [ -d "$ORA_INVENTORY" ]; then
     fi
 fi
 
-if [ "$INSTALL_COMPLETE" -eq 0 ] && [ "$EXTRACT_COMPLETE" -eq 0 ]; then
-    if [ -d "$ORACLE_HOME" ]; then
-        FIRST_HOME_ENTRY="$(find "$ORACLE_HOME" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)"
-        if [ -n "$FIRST_HOME_ENTRY" ]; then
-            echo "FAIL: Oracle Home is not empty and has no extraction marker: $ORACLE_HOME"
-            FAIL_COUNT=$((FAIL_COUNT + 1))
-        else
-            echo "PASS: Oracle Home is empty and ready for extraction."
-            PASS_COUNT=$((PASS_COUNT + 1))
-        fi
-    fi
-    if [ -f "$SOFTWARE_SOURCE_DIR/$ZIP_FILE" ]; then
-        echo "PASS: Oracle Database 19c ZIP is available: $SOFTWARE_SOURCE_DIR/$ZIP_FILE"
-        PASS_COUNT=$((PASS_COUNT + 1))
-    else
-        echo "FAIL: Oracle Database 19c ZIP is missing: $SOFTWARE_SOURCE_DIR/$ZIP_FILE"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
-    fi
-elif [ "$EXTRACT_COMPLETE" -eq 1 ] && [ ! -f "$ORACLE_HOME/runInstaller" ]; then
-    echo "FAIL: Extraction marker exists but runInstaller is missing: $ORACLE_HOME/runInstaller"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-else
-    echo "PASS: Oracle Home extraction state is consistent."
+if [ -d "$ORACLE_HOME" ]; then
+    echo "PASS: Oracle Home is empty and ready for extraction."
     PASS_COUNT=$((PASS_COUNT + 1))
+fi
+
+if [ -f "$SOFTWARE_SOURCE_DIR/$ZIP_FILE" ]; then
+    echo "PASS: Oracle Database 19c ZIP is available: $SOFTWARE_SOURCE_DIR/$ZIP_FILE"
+    PASS_COUNT=$((PASS_COUNT + 1))
+else
+    echo "FAIL: Oracle Database 19c ZIP is missing: $SOFTWARE_SOURCE_DIR/$ZIP_FILE"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
 fi
 
 if [ "$ORACLE_USER_EXISTS" -eq 1 ]; then
@@ -640,10 +673,14 @@ if [ "$ORACLE_USER_EXISTS" -eq 1 ]; then
     done
 fi
 
+fi
+
 if [ "$CREATE_DB" -eq 1 ]; then
     echo ""
     echo "=== Database and Listener target ==="
 
+    # Database checks use the SID and Listener port supplied for this run.
+    # They are never inferred from an existing profile or Listener file.
     if [[ "$ORACLE_SID" =~ ^[A-Z][A-Z0-9]{0,7}$ ]]; then
         echo "PASS: SID format is valid: $ORACLE_SID"
         PASS_COUNT=$((PASS_COUNT + 1))
@@ -667,8 +704,6 @@ if [ "$CREATE_DB" -eq 1 ]; then
     LISTENER_NAME="LSNR_$ORACLE_SID"
     LISTENER_MARKER="$ORACLE_HOME/network/admin/.LSNR_${ORACLE_SID}_complete"
     DATABASE_MARKER="$ORACLE_BASE/.DB_${ORACLE_SID}_complete"
-    LISTENER_COMPLETE=0
-    DATABASE_COMPLETE=0
 
     if [[ "$DB_SERVICE" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
         echo "PASS: Database service format is valid: $DB_SERVICE"
@@ -678,54 +713,49 @@ if [ "$CREATE_DB" -eq 1 ]; then
         FAIL_COUNT=$((FAIL_COUNT + 1))
     fi
 
-    for COMPLETION_MARKER in "$LISTENER_MARKER" "$DATABASE_MARKER"; do
-        if [ -L "$COMPLETION_MARKER" ] ||
-           { [ -e "$COMPLETION_MARKER" ] && [ ! -f "$COMPLETION_MARKER" ]; }; then
-            echo "FAIL: Completion marker must be a regular file: $COMPLETION_MARKER"
-            FAIL_COUNT=$((FAIL_COUNT + 1))
-        fi
-    done
-
-    if [ -f "$LISTENER_MARKER" ] && [ ! -L "$LISTENER_MARKER" ]; then
-        LISTENER_COMPLETE=1
-    fi
-    if [ -f "$DATABASE_MARKER" ] && [ ! -L "$DATABASE_MARKER" ]; then
-        DATABASE_COMPLETE=1
-    fi
-
-    if [ "$LISTENER_COMPLETE" -eq 1 ] && [ "$ROOT_SH_COMPLETE" -eq 0 ]; then
-        echo "FAIL: Listener marker exists before root.sh completion is verified."
+    # Markers are evidence that the SID or Listener name was already used.
+    # Database and Listener stages are never resumed or adopted by this project.
+    if [ -e "$DATABASE_MARKER" ] || [ -L "$DATABASE_MARKER" ]; then
+        echo "FAIL: Oracle SID already exists or has existing database artifacts: $ORACLE_SID"
+        echo "Use a different ORACLE_SID and rerun the installer."
         FAIL_COUNT=$((FAIL_COUNT + 1))
+    else
+        echo "PASS: No database marker exists for SID: $ORACLE_SID"
+        PASS_COUNT=$((PASS_COUNT + 1))
     fi
-    if [ "$DATABASE_COMPLETE" -eq 1 ] && [ "$LISTENER_COMPLETE" -eq 0 ]; then
-        echo "FAIL: Database marker exists without the Listener completion marker."
+    if [ -e "$LISTENER_MARKER" ] || [ -L "$LISTENER_MARKER" ]; then
+        echo "FAIL: Listener already exists: $LISTENER_NAME"
+        echo "Use a different ORACLE_SID and rerun the installer."
         FAIL_COUNT=$((FAIL_COUNT + 1))
-    fi
-    if [ "$DATABASE_COMPLETE" -eq 1 ] && [ "$ROOT_SH_COMPLETE" -eq 0 ]; then
-        echo "FAIL: Database marker exists before root.sh completion is verified."
-        FAIL_COUNT=$((FAIL_COUNT + 1))
+    else
+        echo "PASS: No Listener marker exists for name: $LISTENER_NAME"
+        PASS_COUNT=$((PASS_COUNT + 1))
     fi
 
     REGISTERED_DB=""
+    # Every independent Oracle trace is a conflict for a new database target.
     if [ -r /etc/oratab ]; then
         if ! REGISTERED_DB=$(awk -F: -v name="$ORACLE_SID" '$0 !~ /^[[:space:]]*#/ && toupper($1)==name {print}' /etc/oratab); then
             echo "FAIL: Cannot inspect /etc/oratab."
             FAIL_COUNT=$((FAIL_COUNT + 1))
         fi
-    elif [ "$DATABASE_COMPLETE" -eq 1 ]; then
-        echo "FAIL: Database marker exists but /etc/oratab is not readable."
-        FAIL_COUNT=$((FAIL_COUNT + 1))
     else
         echo "WARN: /etc/oratab is not available before software root scripts run."
         WARN_COUNT=$((WARN_COUNT + 1))
     fi
 
     PROCESS_LIST=""
+    PROCESS_INSPECTION_OK=0
     DB_RUNNING=0
     LISTENER_RUNNING=0
-    if ! PROCESS_LIST=$(ps -eo args= 2>/dev/null); then
+    if ! command -v ps >/dev/null 2>&1; then
+        echo "FAIL: Required target command is missing: ps"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+    elif ! PROCESS_LIST=$(ps -eo args= 2>/dev/null); then
         echo "FAIL: Cannot inspect running processes."
         FAIL_COUNT=$((FAIL_COUNT + 1))
+    else
+        PROCESS_INSPECTION_OK=1
     fi
     if printf '%s\n' "$PROCESS_LIST" | grep -Eiq "^ora_pmon_$ORACLE_SID([[:space:]]|$)"; then
         DB_RUNNING=1
@@ -742,122 +772,40 @@ if [ "$CREATE_DB" -eq 1 ]; then
         fi
     fi
 
-    if [ "$DATABASE_COMPLETE" -eq 1 ]; then
-        if [ -z "$REGISTERED_DB" ]; then
-            echo "FAIL: Database marker exists but /etc/oratab has no target entry."
-            FAIL_COUNT=$((FAIL_COUNT + 1))
-        else
-            REGISTERED_COUNT=$(printf '%s\n' "$REGISTERED_DB" | awk 'NF {count++} END {print count + 0}')
-            REGISTERED_HOME=$(printf '%s\n' "$REGISTERED_DB" | awk -F: 'NF {print $2; exit}')
-            if [ "$REGISTERED_COUNT" -ne 1 ] || [ "$REGISTERED_HOME" != "$ORACLE_HOME" ]; then
-                echo "FAIL: Database marker and /etc/oratab are inconsistent for $ORACLE_SID."
-                FAIL_COUNT=$((FAIL_COUNT + 1))
-            else
-                echo "PASS: Database marker and /etc/oratab are consistent."
-                PASS_COUNT=$((PASS_COUNT + 1))
-            fi
-        fi
-
-        if [ ! -f "$ORACLE_HOME/dbs/spfile$ORACLE_SID.ora" ]; then
-            echo "FAIL: Database marker exists but the target spfile is missing."
-            FAIL_COUNT=$((FAIL_COUNT + 1))
-        else
-            echo "PASS: Target database spfile is present."
-            PASS_COUNT=$((PASS_COUNT + 1))
-        fi
-
-        for ROOT_DIR in "$DATA_DIR" "$FRA_DIR"; do
-            if [[ "$ROOT_DIR" != /* ]] || [ "$ROOT_DIR" = / ]; then
-                echo "FAIL: Storage root must be an absolute path other than /: $ROOT_DIR"
-                FAIL_COUNT=$((FAIL_COUNT + 1))
-            elif [ -L "$ROOT_DIR/$ORACLE_SID" ] || [ ! -d "$ROOT_DIR/$ORACLE_SID" ]; then
-                echo "FAIL: Database marker exists but the target directory is unavailable: $ROOT_DIR/$ORACLE_SID"
-                FAIL_COUNT=$((FAIL_COUNT + 1))
-            else
-                echo "PASS: Target database directory is present: $ROOT_DIR/$ORACLE_SID"
-                PASS_COUNT=$((PASS_COUNT + 1))
-            fi
-        done
-
-        if [ "$DB_RUNNING" -eq 1 ]; then
-            if [ ! -x "$ORACLE_HOME/bin/sqlplus" ]; then
-                echo "FAIL: Database is running but SQL*Plus is unavailable."
-                FAIL_COUNT=$((FAIL_COUNT + 1))
-            elif ! DATABASE_STATUS=$(runuser -u "$ORACLE_OWNER" -- env \
-                ORACLE_SID="$ORACLE_SID" ORACLE_HOME="$ORACLE_HOME" \
-                PATH="$ORACLE_HOME/bin:/usr/bin:/bin" LD_LIBRARY_PATH="$ORACLE_HOME/lib" \
-                "$ORACLE_HOME/bin/sqlplus" -L -s / as sysdba <<'SQL'
-WHENEVER OSERROR EXIT FAILURE
-WHENEVER SQLERROR EXIT FAILURE
-SET HEADING OFF FEEDBACK OFF PAGES 0 VERIFY OFF ECHO OFF
-SELECT name || ':' || open_mode FROM v$database;
-EXIT SUCCESS
-SQL
-            ); then
-                echo "FAIL: Database marker exists but OS authentication failed."
-                FAIL_COUNT=$((FAIL_COUNT + 1))
-            elif printf '%s\n' "$DATABASE_STATUS" | grep -Eq "^[[:space:]]*$ORACLE_SID:READ WRITE[[:space:]]*$"; then
-                echo "PASS: Completed database is running and open read write."
-                PASS_COUNT=$((PASS_COUNT + 1))
-            else
-                echo "FAIL: Database marker and database identity or open mode are inconsistent."
-                FAIL_COUNT=$((FAIL_COUNT + 1))
-            fi
-        else
-            echo "WARN: Completed database is stopped; the installer will start and verify it."
-            WARN_COUNT=$((WARN_COUNT + 1))
-        fi
-    else
-        if [ -n "$REGISTERED_DB" ]; then
-            echo "FAIL: Target database is registered without its completion marker: $ORACLE_SID"
-            FAIL_COUNT=$((FAIL_COUNT + 1))
-        else
-            echo "PASS: Target database is not registered in /etc/oratab."
-            PASS_COUNT=$((PASS_COUNT + 1))
-        fi
-        if [ "$DB_RUNNING" -eq 1 ]; then
-            echo "FAIL: Target database is running without its completion marker: $ORACLE_SID"
-            FAIL_COUNT=$((FAIL_COUNT + 1))
-        else
-            echo "PASS: Target database instance is not running."
-            PASS_COUNT=$((PASS_COUNT + 1))
-        fi
-        if [ -n "$DB_FILES" ]; then
-            echo "FAIL: Target database files exist without its completion marker: $DB_FILES"
-            FAIL_COUNT=$((FAIL_COUNT + 1))
-        elif [ -d "$ORACLE_HOME/dbs" ]; then
-            echo "PASS: No target database files exist in Oracle Home."
-            PASS_COUNT=$((PASS_COUNT + 1))
-        else
-            echo "WARN: Oracle dbs directory will be installed before database creation."
-            WARN_COUNT=$((WARN_COUNT + 1))
-        fi
-
-        for ROOT_DIR in "$DATA_DIR" "$FRA_DIR"; do
-            if [[ "$ROOT_DIR" != /* ]] || [ "$ROOT_DIR" = / ]; then
-                echo "FAIL: Storage root must be an absolute path other than /: $ROOT_DIR"
-                FAIL_COUNT=$((FAIL_COUNT + 1))
-            elif [ -L "$ROOT_DIR/$ORACLE_SID" ]; then
-                echo "FAIL: Target database directory must not be a symbolic link: $ROOT_DIR/$ORACLE_SID"
-                FAIL_COUNT=$((FAIL_COUNT + 1))
-            elif [ -e "$ROOT_DIR/$ORACLE_SID" ]; then
-                echo "FAIL: Target database directory exists without its completion marker: $ROOT_DIR/$ORACLE_SID"
-                FAIL_COUNT=$((FAIL_COUNT + 1))
-            elif [ -e "$ROOT_DIR" ] && [ ! -d "$ROOT_DIR" ]; then
-                echo "FAIL: Storage root exists but is not a directory: $ROOT_DIR"
-                FAIL_COUNT=$((FAIL_COUNT + 1))
-            elif [ -d "$ROOT_DIR" ]; then
-                echo "PASS: Storage root is ready: $ROOT_DIR"
-                PASS_COUNT=$((PASS_COUNT + 1))
-            else
-                echo "WARN: Storage root will be created: $ROOT_DIR"
-                WARN_COUNT=$((WARN_COUNT + 1))
-            fi
-        done
+    if [ -n "$REGISTERED_DB" ] || [ "$DB_RUNNING" -eq 1 ] || [ -n "$DB_FILES" ]; then
+        echo "FAIL: Oracle SID already exists or has existing database artifacts: $ORACLE_SID"
+        echo "Use a different ORACLE_SID and rerun the installer."
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+    elif [ "$PROCESS_INSPECTION_OK" -eq 1 ]; then
+        echo "PASS: Oracle SID is not registered, running, or present in Oracle Home."
+        PASS_COUNT=$((PASS_COUNT + 1))
     fi
+
+    for ROOT_DIR in "$DATA_DIR" "$FRA_DIR"; do
+        if [[ "$ROOT_DIR" != /* ]] || [ "$ROOT_DIR" = / ]; then
+            echo "FAIL: Storage root must be an absolute path other than /: $ROOT_DIR"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+        elif [ -L "$ROOT_DIR/$ORACLE_SID" ] || [ -e "$ROOT_DIR/$ORACLE_SID" ]; then
+            echo "FAIL: Oracle SID already exists or has existing database artifacts: $ORACLE_SID"
+            echo "Use a different ORACLE_SID and rerun the installer."
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+        elif [ -e "$ROOT_DIR" ] && [ ! -d "$ROOT_DIR" ]; then
+            echo "FAIL: Storage root exists but is not a directory: $ROOT_DIR"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+        elif [ -d "$ROOT_DIR" ]; then
+            echo "PASS: Storage root is ready: $ROOT_DIR"
+            PASS_COUNT=$((PASS_COUNT + 1))
+        else
+            echo "WARN: Storage root will be created: $ROOT_DIR"
+            WARN_COUNT=$((WARN_COUNT + 1))
+        fi
+    done
 
     LISTENER_FILE="$ORACLE_HOME/network/admin/listener.ora"
     LISTENER_CONFIG=""
+
+    # Strip comments for simple target-name and endpoint checks. IFILE is not
+    # expanded because included Listener configuration needs DBA review.
     if [ -e "$LISTENER_FILE" ] && [ ! -r "$LISTENER_FILE" ]; then
         echo "FAIL: Listener configuration is not readable: $LISTENER_FILE"
         FAIL_COUNT=$((FAIL_COUNT + 1))
@@ -872,88 +820,51 @@ SQL
     fi
 
     SOCKETS=""
+    SOCKET_INSPECTION_OK=0
     PORT_IN_USE=0
-    if ! SOCKETS=$(ss -H -ltn 2>/dev/null); then
+    if ! command -v ss >/dev/null 2>&1; then
+        echo "FAIL: Required target command is missing: ss"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+    elif ! SOCKETS=$(ss -H -ltn 2>/dev/null); then
         echo "FAIL: Cannot inspect listening TCP ports."
         FAIL_COUNT=$((FAIL_COUNT + 1))
+    else
+        SOCKET_INSPECTION_OK=1
     fi
     if printf '%s\n' "$SOCKETS" | awk '{print $4}' | grep -Eq ":$LISTENER_PORT$"; then
         PORT_IN_USE=1
     fi
 
-    if [ "$LISTENER_COMPLETE" -eq 1 ]; then
-        if [ ! -r "$LISTENER_FILE" ]; then
-            echo "FAIL: Listener marker exists but listener.ora is unavailable."
-            FAIL_COUNT=$((FAIL_COUNT + 1))
-        elif ! printf '%s\n' "$LISTENER_CONFIG" | grep -Eiq "^[[:space:]]*$LISTENER_NAME[[:space:]]*=" ||
-             ! printf '%s\n' "$LISTENER_CONFIG" | tr -d '[:space:]' | grep -Fiq "(HOST=$DB_HOST)" ||
-             ! printf '%s\n' "$LISTENER_CONFIG" | tr -d '[:space:]' | grep -Eiq "\\(PORT=0*$LISTENER_PORT\\)"; then
-            echo "FAIL: Listener marker and listener.ora are inconsistent."
-            FAIL_COUNT=$((FAIL_COUNT + 1))
-        else
-            echo "PASS: Listener marker and listener.ora are consistent."
-            PASS_COUNT=$((PASS_COUNT + 1))
-        fi
-
-        if [ "$LISTENER_RUNNING" -eq 1 ]; then
-            if [ ! -x "$ORACLE_HOME/bin/lsnrctl" ]; then
-                echo "FAIL: Listener is running but lsnrctl is unavailable."
-                FAIL_COUNT=$((FAIL_COUNT + 1))
-            elif ! LISTENER_STATUS=$(runuser -u "$ORACLE_OWNER" -- env \
-                ORACLE_HOME="$ORACLE_HOME" TNS_ADMIN="$ORACLE_HOME/network/admin" \
-                PATH="$ORACLE_HOME/bin:/usr/bin:/bin" LD_LIBRARY_PATH="$ORACLE_HOME/lib" \
-                "$ORACLE_HOME/bin/lsnrctl" status "$LISTENER_NAME" 2>&1); then
-                echo "FAIL: Listener marker exists but Listener status verification failed."
-                FAIL_COUNT=$((FAIL_COUNT + 1))
-            elif printf '%s\n' "$LISTENER_STATUS" | tr -d '[:space:]' | grep -Fiq "(HOST=$DB_HOST)(PORT=$LISTENER_PORT)"; then
-                echo "PASS: Completed Listener is running on the expected endpoint."
-                PASS_COUNT=$((PASS_COUNT + 1))
-            else
-                echo "FAIL: Listener marker and active endpoint are inconsistent."
-                FAIL_COUNT=$((FAIL_COUNT + 1))
-            fi
-        elif [ "$PORT_IN_USE" -eq 1 ]; then
-            echo "FAIL: Completed Listener is stopped but its TCP port is used by another process."
-            FAIL_COUNT=$((FAIL_COUNT + 1))
-        else
-            echo "WARN: Completed Listener is stopped; the installer will start and verify it."
-            WARN_COUNT=$((WARN_COUNT + 1))
-        fi
-    else
-        if printf '%s\n' "$LISTENER_CONFIG" | grep -Eiq "^[[:space:]]*$LISTENER_NAME[[:space:]]*=" ||
-           printf '%s\n' "$LISTENER_CONFIG" | tr -d '[:space:]' | grep -Eiq "\\(PORT=0*$LISTENER_PORT\\)"; then
-            echo "FAIL: Listener name or port is configured without its completion marker."
-            FAIL_COUNT=$((FAIL_COUNT + 1))
-        else
-            echo "PASS: Listener name and port are not configured."
-            PASS_COUNT=$((PASS_COUNT + 1))
-        fi
-        if [ "$LISTENER_RUNNING" -eq 1 ]; then
-            echo "FAIL: Target Listener is running without its completion marker."
-            FAIL_COUNT=$((FAIL_COUNT + 1))
-        elif [ "$PORT_IN_USE" -eq 1 ]; then
-            echo "FAIL: Listener TCP port is already in use: $LISTENER_PORT"
-            FAIL_COUNT=$((FAIL_COUNT + 1))
-        else
-            echo "PASS: Listener TCP port is available: $LISTENER_PORT"
-            PASS_COUNT=$((PASS_COUNT + 1))
-        fi
+    LISTENER_NAME_EXISTS=0
+    if printf '%s\n' "$LISTENER_CONFIG" | grep -Eiq "^[[:space:]]*$LISTENER_NAME[[:space:]]*=" ||
+       [ "$LISTENER_RUNNING" -eq 1 ]; then
+        LISTENER_NAME_EXISTS=1
+    elif [ -x "$ORACLE_HOME/bin/lsnrctl" ] &&
+         runuser -u "$ORACLE_OWNER" -- env \
+             ORACLE_HOME="$ORACLE_HOME" TNS_ADMIN="$ORACLE_HOME/network/admin" \
+             PATH="$ORACLE_HOME/bin:/usr/bin:/bin" LD_LIBRARY_PATH="$ORACLE_HOME/lib" \
+             "$ORACLE_HOME/bin/lsnrctl" status "$LISTENER_NAME" >/dev/null 2>&1; then
+        LISTENER_NAME_EXISTS=1
     fi
 
-    if [ "$INSTALL_COMPLETE" -eq 1 ]; then
-        for ORACLE_TOOL in dbca lsnrctl sqlplus; do
-            if [ -x "$ORACLE_HOME/bin/$ORACLE_TOOL" ]; then
-                echo "PASS: Oracle tool is available: $ORACLE_TOOL"
-                PASS_COUNT=$((PASS_COUNT + 1))
-            else
-                echo "FAIL: Installed Oracle Home is missing tool: $ORACLE_TOOL"
-                FAIL_COUNT=$((FAIL_COUNT + 1))
-            fi
-        done
-    else
-        echo "WARN: Oracle database tools will be checked again after software installation."
-        WARN_COUNT=$((WARN_COUNT + 1))
+    if [ "$LISTENER_NAME_EXISTS" -eq 1 ]; then
+        echo "FAIL: Listener already exists: $LISTENER_NAME"
+        echo "Use a different ORACLE_SID and rerun the installer."
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+    elif [ "$PROCESS_INSPECTION_OK" -eq 1 ]; then
+        echo "PASS: Listener name is not configured or running: $LISTENER_NAME"
+        PASS_COUNT=$((PASS_COUNT + 1))
     fi
+
+    if [ "$PORT_IN_USE" -eq 1 ]; then
+        echo "FAIL: Listener port is already in use: $LISTENER_PORT"
+        echo "Use an unused LISTENER_PORT and rerun the installer."
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+    elif [ "$SOCKET_INSPECTION_OK" -eq 1 ]; then
+        echo "PASS: Listener TCP port is available: $LISTENER_PORT"
+        PASS_COUNT=$((PASS_COUNT + 1))
+    fi
+
 fi
 
 echo ""
@@ -964,10 +875,13 @@ echo "PASS: $PASS_COUNT"
 echo "WARN: $WARN_COUNT"
 echo "FAIL: $FAIL_COUNT"
 
+# Warnings describe work that Main can perform. Any failure is a hard gate.
 if [ "$FAIL_COUNT" -gt 0 ]; then
-    echo "Precheck failed. No installation changes were made by this script."
+    echo "PRECHECK RESULT: FAIL"
+    echo "No installation changes were made by this script."
     exit 1
 fi
 
-echo "Precheck passed. Warnings may be handled by the installation script."
+echo "PRECHECK RESULT: PASS"
+echo "Warnings may be handled by the installation script."
 exit 0
