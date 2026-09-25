@@ -22,9 +22,6 @@ if [ -z "${PACKAGE_NAME:-}" ] || [ -z "${PREINSTALL_SYSCTL:-}" ] ||
    [ -z "${CUSTOM_SYSCTL:-}" ] || [ -z "${LIMITS_FILE:-}" ] ||
    [ -z "${SELINUX_CONFIG:-}" ] || [ -z "${TIMEZONE:-}" ] ||
    [ -z "${SOFTWARE_SOURCE_DIR:-}" ] || [ -z "${ZIP_FILE:-}" ] ||
-   [ -z "${OPATCH_ZIP:-}" ] || [ -z "${OPATCH_MINIMUM_VERSION:-}" ] ||
-   [ -z "${RU_VERSION:-}" ] || [ -z "${RU_PATCH_ID:-}" ] ||
-   [ -z "${RU_ZIP:-}" ] || [ -z "${PATCH_STAGE_DIR:-}" ] ||
    [ -z "${ORACLE_BASE:-}" ] || [ -z "${ORACLE_HOME:-}" ] ||
    [ -z "${ORA_INVENTORY:-}" ] || [ -z "${ORAINST_FILE:-}" ] ||
    [ -z "${ORACLE_OWNER:-}" ] || [ -z "${ORACLE_GROUP:-}" ] ||
@@ -34,13 +31,9 @@ if [ -z "${PACKAGE_NAME:-}" ] || [ -z "${PREINSTALL_SYSCTL:-}" ] ||
 fi
 
 EXTRACT_MARKER="$ORACLE_HOME/.oracle_19c_extraction_complete"
-OPATCH_MARKER="$ORACLE_HOME/.opatch_update_complete"
-RU_EXTRACT_MARKER="$PATCH_STAGE_DIR/.ru_${RU_PATCH_ID}_extraction_complete"
 INSTALL_MARKER="$ORACLE_HOME/.oracle_19c_installer_complete"
 ORAINST_ROOT_MARKER="$ORA_INVENTORY/.orainstRoot_complete"
 ROOT_SH_MARKER="$ORACLE_HOME/.root_sh_complete"
-OPATCH_BACKUP_DIR="$ORACLE_HOME/OPatch.base_19.3"
-RU_PATCH_DIR="$PATCH_STAGE_DIR/$RU_PATCH_ID"
 DB_HOST="$(hostname -f 2>/dev/null)"
 DB_SERVICE=""
 CREATE_DB=0
@@ -53,8 +46,6 @@ OS_MAJOR=""
 PACKAGE_INSTALLED=0
 ORACLE_USER_EXISTS=0
 EXTRACT_COMPLETE=0
-OPATCH_COMPLETE=0
-RU_EXTRACT_COMPLETE=0
 INSTALL_COMPLETE=0
 ORAINST_ROOT_COMPLETE=0
 ROOT_SH_COMPLETE=0
@@ -62,14 +53,6 @@ INVENTORY_DECLARED=0
 TMP_MINIMUM_MB=1024
 ORACLE_SOFTWARE_MINIMUM_MB=7373
 ORACLE_SOFTWARE_RECOMMENDED_MB=102400
-
-version_is_at_least() {
-    local CURRENT_VERSION="$1"
-    local MINIMUM_VERSION="$2"
-
-    printf '%s\n%s\n' "$MINIMUM_VERSION" "$CURRENT_VERSION" |
-        LC_ALL=C sort -V -C
-}
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -153,8 +136,7 @@ else
     FAIL_COUNT=$((FAIL_COUNT + 1))
 fi
 
-for REQUIRED_COMMAND in awk df dirname find free getenforce getent grep hostname id \
-    ps rpm runuser sed sort ss stat sysctl systemctl timedatectl tr uname unzip; do
+for REQUIRED_COMMAND in awk df dirname find free getenforce getent grep hostname id ps rpm runuser sed sort ss stat sysctl systemctl timedatectl tr uname; do
     if command -v "$REQUIRED_COMMAND" >/dev/null 2>&1; then
         echo "PASS: Required command is available: $REQUIRED_COMMAND"
         PASS_COUNT=$((PASS_COUNT + 1))
@@ -190,7 +172,7 @@ else
                 5.4.*el7uek*)
                     KERNEL_FAMILY="Oracle Linux 7 UEK6"
                     MINIMUM_KERNEL="5.4.17-2011.4.4.el7uek.x86_64"
-                    KERNEL_RU_NOTE="Oracle Linux 7 UEK6 requires Oracle Database 19c RU 19.9 or later; configured target RU is $RU_VERSION."
+                    KERNEL_RU_NOTE="Oracle Linux 7 UEK6 requires Oracle Database 19c RU 19.9 or later; the current Oracle Home RU is not checked."
                     ;;
                 *uek*)
                     ;;
@@ -209,7 +191,7 @@ else
                 5.15.*el8uek*)
                     KERNEL_FAMILY="Oracle Linux 8 UEK7"
                     MINIMUM_KERNEL="5.15.0-202.135.2.el8uek.x86_64"
-                    KERNEL_RU_NOTE="Oracle Linux 8 UEK7 requires Oracle Database 19c RU 19.21 or later; configured target RU is $RU_VERSION."
+                    KERNEL_RU_NOTE="Oracle Linux 8 UEK7 requires Oracle Database 19c RU 19.21 or later; the current Oracle Home RU is not checked."
                     ;;
                 *uek*)
                     ;;
@@ -260,17 +242,6 @@ else
     else
         echo "FAIL: Package is not installed or available from enabled repositories: $PACKAGE_NAME"
         FAIL_COUNT=$((FAIL_COUNT + 1))
-    fi
-fi
-
-if [ "${ID:-}" = "ol" ] && [ "$OS_MAJOR" = "8" ]; then
-    if rpm -q compat-libcap1 >/dev/null 2>&1; then
-        echo "PASS: compat-libcap1 is installed; Oracle Bug 29772579 workaround is not required."
-        PASS_COUNT=$((PASS_COUNT + 1))
-    else
-        echo "WARN: Oracle Bug 29772579 condition is present on Oracle Linux 8."
-        echo "WARN: Main permits -ignorePrereqFailure only when this exact condition is detected."
-        WARN_COUNT=$((WARN_COUNT + 1))
     fi
 fi
 
@@ -484,8 +455,7 @@ else
 fi
 
 INVENTORY_FILE="$ORA_INVENTORY/ContentsXML/inventory.xml"
-for COMPLETION_MARKER in "$EXTRACT_MARKER" "$OPATCH_MARKER" \
-    "$RU_EXTRACT_MARKER" "$INSTALL_MARKER" \
+for COMPLETION_MARKER in "$EXTRACT_MARKER" "$INSTALL_MARKER" \
     "$ORAINST_ROOT_MARKER" "$ROOT_SH_MARKER"; do
     if [ -L "$COMPLETION_MARKER" ] ||
        { [ -e "$COMPLETION_MARKER" ] && [ ! -f "$COMPLETION_MARKER" ]; }; then
@@ -498,83 +468,15 @@ if [ -f "$EXTRACT_MARKER" ] && [ ! -L "$EXTRACT_MARKER" ]; then
     EXTRACT_COMPLETE=1
 fi
 
-if [ -f "$OPATCH_MARKER" ] && [ ! -L "$OPATCH_MARKER" ]; then
-    if ! IFS= read -r RECORDED_OPATCH_VERSION < "$OPATCH_MARKER" ||
-       [ -z "$RECORDED_OPATCH_VERSION" ]; then
-        echo "FAIL: OPatch completion marker has no version: $OPATCH_MARKER"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
-    elif [ "$ORACLE_USER_EXISTS" -ne 1 ]; then
-        echo "FAIL: OPatch marker exists but the Oracle owner is missing: $ORACLE_OWNER"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
-    elif [ ! -x "$ORACLE_HOME/OPatch/opatch" ]; then
-        echo "FAIL: OPatch marker exists but the executable is missing."
-        FAIL_COUNT=$((FAIL_COUNT + 1))
-    else
-        ACTUAL_OPATCH_VERSION="$(runuser -u "$ORACLE_OWNER" -- \
-            "$ORACLE_HOME/OPatch/opatch" version 2>/dev/null |
-            awk '/^OPatch Version:/ { print $3; exit }')"
-        if [ -z "$ACTUAL_OPATCH_VERSION" ] ||
-           [ "$ACTUAL_OPATCH_VERSION" != "$RECORDED_OPATCH_VERSION" ] ||
-           ! version_is_at_least "$ACTUAL_OPATCH_VERSION" "$OPATCH_MINIMUM_VERSION"; then
-            echo "FAIL: OPatch marker and installed version are inconsistent."
-            echo "INFO: Recorded=$RECORDED_OPATCH_VERSION actual=${ACTUAL_OPATCH_VERSION:-unknown} minimum=$OPATCH_MINIMUM_VERSION"
-            FAIL_COUNT=$((FAIL_COUNT + 1))
-        else
-            OPATCH_COMPLETE=1
-            echo "PASS: OPatch version is verified: $ACTUAL_OPATCH_VERSION"
-            PASS_COUNT=$((PASS_COUNT + 1))
-        fi
-    fi
-elif [ -e "$OPATCH_BACKUP_DIR" ] || [ -L "$OPATCH_BACKUP_DIR" ]; then
-    echo "FAIL: OPatch backup exists without a completion marker: $OPATCH_BACKUP_DIR"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-elif [ "$EXTRACT_COMPLETE" -eq 1 ]; then
-    echo "WARN: OPatch update has not completed."
-    WARN_COUNT=$((WARN_COUNT + 1))
-fi
-
-if [ -f "$RU_EXTRACT_MARKER" ] && [ ! -L "$RU_EXTRACT_MARKER" ]; then
-    if ! IFS= read -r RECORDED_RU_PATCH_ID < "$RU_EXTRACT_MARKER" ||
-       [ "$RECORDED_RU_PATCH_ID" != "$RU_PATCH_ID" ]; then
-        echo "FAIL: RU extraction marker does not match patch ID $RU_PATCH_ID."
-        FAIL_COUNT=$((FAIL_COUNT + 1))
-    elif [ ! -f "$RU_PATCH_DIR/etc/config/inventory" ]; then
-        echo "FAIL: RU marker exists but the extracted patch inventory is missing."
-        FAIL_COUNT=$((FAIL_COUNT + 1))
-    else
-        RU_EXTRACT_COMPLETE=1
-        echo "PASS: RU extraction is verified: $RU_PATCH_ID"
-        PASS_COUNT=$((PASS_COUNT + 1))
-    fi
-elif [ -e "$RU_PATCH_DIR" ] || [ -L "$RU_PATCH_DIR" ]; then
-    echo "FAIL: RU patch directory exists without a completion marker: $RU_PATCH_DIR"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-else
-    echo "WARN: RU $RU_VERSION has not been extracted."
-    WARN_COUNT=$((WARN_COUNT + 1))
-fi
-
 if [ -f "$INSTALL_MARKER" ] && [ ! -L "$INSTALL_MARKER" ]; then
     if ! IFS= read -r INSTALL_BATCH_ID < "$INSTALL_MARKER" ||
        [ -z "$INSTALL_BATCH_ID" ]; then
         echo "FAIL: Installer completion marker has no installation batch ID: $INSTALL_MARKER"
         FAIL_COUNT=$((FAIL_COUNT + 1))
-    elif [ "$OPATCH_COMPLETE" -ne 1 ] || [ "$RU_EXTRACT_COMPLETE" -ne 1 ]; then
-        echo "FAIL: Installer marker exists before OPatch and RU stages are verified."
-        FAIL_COUNT=$((FAIL_COUNT + 1))
     elif [ -f "$INVENTORY_FILE" ] && grep -Fq "LOC=\"$ORACLE_HOME\"" "$INVENTORY_FILE"; then
-        if ! PATCH_LIST="$(runuser -u "$ORACLE_OWNER" -- \
-            "$ORACLE_HOME/OPatch/opatch" lspatches 2>/dev/null)"; then
-            echo "FAIL: Cannot read the Oracle Home patch inventory."
-            FAIL_COUNT=$((FAIL_COUNT + 1))
-        elif ! printf '%s\n' "$PATCH_LIST" | grep -Fq "$RU_PATCH_ID"; then
-            echo "FAIL: Installer marker exists but RU patch is not applied: $RU_PATCH_ID"
-            FAIL_COUNT=$((FAIL_COUNT + 1))
-        else
-            INSTALL_COMPLETE=1
-            echo "PASS: Installer, Inventory and RU patch state are consistent."
-            PASS_COUNT=$((PASS_COUNT + 1))
-        fi
+        INSTALL_COMPLETE=1
+        echo "PASS: Installer marker and Inventory registration are consistent."
+        PASS_COUNT=$((PASS_COUNT + 1))
     else
         echo "FAIL: Installer marker exists without matching Inventory registration."
         FAIL_COUNT=$((FAIL_COUNT + 1))
@@ -625,16 +527,6 @@ if [ "$INSTALL_COMPLETE" -eq 1 ] && [ "$EXTRACT_COMPLETE" -eq 0 ]; then
     FAIL_COUNT=$((FAIL_COUNT + 1))
 fi
 
-if [ "$OPATCH_COMPLETE" -eq 1 ] && [ "$EXTRACT_COMPLETE" -eq 0 ]; then
-    echo "FAIL: OPatch completion is recorded but Oracle Home extraction is not complete."
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-fi
-
-if [ "$INSTALL_COMPLETE" -eq 1 ] && [ "$RU_EXTRACT_COMPLETE" -eq 0 ]; then
-    echo "FAIL: Installer completion is recorded but RU extraction is not complete."
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-fi
-
 if [ -f "$ORAINST_ROOT_MARKER" ] && [ ! -L "$ORAINST_ROOT_MARKER" ]; then
     if [ "$INSTALL_COMPLETE" -eq 1 ]; then
         ORAINST_ROOT_COMPLETE=1
@@ -665,8 +557,7 @@ elif [ ! -e "$ROOT_SH_MARKER" ] && [ ! -L "$ROOT_SH_MARKER" ] &&
     WARN_COUNT=$((WARN_COUNT + 1))
 fi
 
-for ORACLE_DIR in "$SOFTWARE_SOURCE_DIR" "$PATCH_STAGE_DIR" \
-    "$ORACLE_BASE" "$ORACLE_HOME" "$ORA_INVENTORY"; do
+for ORACLE_DIR in "$SOFTWARE_SOURCE_DIR" "$ORACLE_BASE" "$ORACLE_HOME" "$ORA_INVENTORY"; do
     if [ -e "$ORACLE_DIR" ] && [ ! -d "$ORACLE_DIR" ]; then
         echo "FAIL: Path exists but is not a directory: $ORACLE_DIR"
         FAIL_COUNT=$((FAIL_COUNT + 1))
@@ -733,38 +624,8 @@ else
     PASS_COUNT=$((PASS_COUNT + 1))
 fi
 
-if [ "$OPATCH_COMPLETE" -eq 0 ]; then
-    if [ -L "$SOFTWARE_SOURCE_DIR/$OPATCH_ZIP" ] ||
-       [ ! -f "$SOFTWARE_SOURCE_DIR/$OPATCH_ZIP" ]; then
-        echo "FAIL: OPatch ZIP is missing or is not a regular file: $SOFTWARE_SOURCE_DIR/$OPATCH_ZIP"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
-    elif [ "$ORACLE_USER_EXISTS" -eq 1 ] &&
-         ! runuser -u "$ORACLE_OWNER" -- test -r "$SOFTWARE_SOURCE_DIR/$OPATCH_ZIP"; then
-        echo "FAIL: $ORACLE_OWNER cannot read: $SOFTWARE_SOURCE_DIR/$OPATCH_ZIP"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
-    else
-        echo "PASS: OPatch ZIP is available: $SOFTWARE_SOURCE_DIR/$OPATCH_ZIP"
-        PASS_COUNT=$((PASS_COUNT + 1))
-    fi
-fi
-
-if [ "$RU_EXTRACT_COMPLETE" -eq 0 ]; then
-    if [ -L "$SOFTWARE_SOURCE_DIR/$RU_ZIP" ] ||
-       [ ! -f "$SOFTWARE_SOURCE_DIR/$RU_ZIP" ]; then
-        echo "FAIL: RU ZIP is missing or is not a regular file: $SOFTWARE_SOURCE_DIR/$RU_ZIP"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
-    elif [ "$ORACLE_USER_EXISTS" -eq 1 ] &&
-         ! runuser -u "$ORACLE_OWNER" -- test -r "$SOFTWARE_SOURCE_DIR/$RU_ZIP"; then
-        echo "FAIL: $ORACLE_OWNER cannot read: $SOFTWARE_SOURCE_DIR/$RU_ZIP"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
-    else
-        echo "PASS: RU ZIP is available: $SOFTWARE_SOURCE_DIR/$RU_ZIP"
-        PASS_COUNT=$((PASS_COUNT + 1))
-    fi
-fi
-
 if [ "$ORACLE_USER_EXISTS" -eq 1 ]; then
-    for ORACLE_DIR in "$PATCH_STAGE_DIR" "$ORACLE_BASE" "$ORACLE_HOME"; do
+    for ORACLE_DIR in "$ORACLE_BASE" "$ORACLE_HOME"; do
         if [ -d "$ORACLE_DIR" ]; then
             if runuser -u "$ORACLE_OWNER" -- test -r "$ORACLE_DIR" &&
                runuser -u "$ORACLE_OWNER" -- test -w "$ORACLE_DIR" &&

@@ -10,15 +10,13 @@ unset ORACLE_PASSWORD DB_PASSWORD PASSWORD_CONFIRM DB_PASSWORD_RSP
 # OS preparation and root scripts run as root; extraction and installation run as ORACLE_OWNER.
 # OL8 installation assumes acceptance of CV_ASSUME_DISTID=OL7 for the 19.3 media.
 # The Bug 29772579 prerequisite workaround is enabled only when OL8 lacks compat-libcap1.
-# The configured Release Update is applied during Oracle software installation.
-# This script does not verify full OS/kernel/Oracle certification.
+# This script does not apply an RU or verify OS/kernel/Oracle certification.
 
 if ! SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; then
     echo "ERROR: Cannot determine the script directory."
     exit 1
 fi
 CONFIG_FILE="$SCRIPT_DIR/oracle_install.conf"
-PRECHECK_SCRIPT="$SCRIPT_DIR/oracle_linux_7_8_19c_precheck.sh"
 
 if [ -L "$CONFIG_FILE" ] || [ ! -f "$CONFIG_FILE" ]; then
     echo "ERROR: Configuration must be a regular file: $CONFIG_FILE"
@@ -33,9 +31,6 @@ fi
 if [ -z "${PACKAGE_NAME:-}" ] || [ -z "${LIMITS_FILE:-}" ] ||
    [ -z "${SELINUX_CONFIG:-}" ] || [ -z "${TIMEZONE:-}" ] ||
    [ -z "${SOFTWARE_SOURCE_DIR:-}" ] || [ -z "${ZIP_FILE:-}" ] ||
-   [ -z "${OPATCH_ZIP:-}" ] || [ -z "${OPATCH_MINIMUM_VERSION:-}" ] ||
-   [ -z "${RU_VERSION:-}" ] || [ -z "${RU_PATCH_ID:-}" ] ||
-   [ -z "${RU_ZIP:-}" ] || [ -z "${PATCH_STAGE_DIR:-}" ] ||
    [ -z "${ORACLE_BASE:-}" ] || [ -z "${ORACLE_HOME:-}" ] ||
    [ -z "${ORA_INVENTORY:-}" ] || [ -z "${ORAINST_FILE:-}" ] ||
    [ -z "${ORACLE_OWNER:-}" ] || [ -z "${ORACLE_GROUP:-}" ] ||
@@ -48,13 +43,9 @@ if [ -z "${PACKAGE_NAME:-}" ] || [ -z "${LIMITS_FILE:-}" ] ||
 fi
 
 EXTRACT_MARKER="$ORACLE_HOME/.oracle_19c_extraction_complete"
-OPATCH_MARKER="$ORACLE_HOME/.opatch_update_complete"
-RU_EXTRACT_MARKER="$PATCH_STAGE_DIR/.ru_${RU_PATCH_ID}_extraction_complete"
 INSTALL_MARKER="$ORACLE_HOME/.oracle_19c_installer_complete"
 ORAINST_ROOT_MARKER="$ORA_INVENTORY/.orainstRoot_complete"
 ROOT_SH_MARKER="$ORACLE_HOME/.root_sh_complete"
-OPATCH_BACKUP_DIR="$ORACLE_HOME/OPatch.base_19.3"
-RU_PATCH_DIR="$PATCH_STAGE_DIR/$RU_PATCH_ID"
 LISTENER_PORT=""
 DB_SERVICE=""
 DB_HOST="$(hostname -f 2>/dev/null)"
@@ -82,69 +73,6 @@ check_marker_file() {
         echo "ERROR: Completion marker must be a regular file: $MARKER_FILE"
         exit 1
     fi
-}
-
-prepare_oracle_source_file() {
-    local SOURCE_FILE="$1"
-    local SOURCE_OWNER
-
-    if [ -L "$SOURCE_FILE" ] || [ ! -f "$SOURCE_FILE" ]; then
-        echo "ERROR: Software source must be a regular file: $SOURCE_FILE"
-        return 1
-    fi
-
-    if ! SOURCE_OWNER="$(stat -Lc %U "$SOURCE_FILE")"; then
-        echo "ERROR: Failed to check software source owner: $SOURCE_FILE"
-        return 1
-    fi
-
-    if [ "$SOURCE_OWNER" != "$ORACLE_OWNER" ]; then
-        echo "Changing software source owner from $SOURCE_OWNER to $ORACLE_OWNER..."
-        if ! chown "$ORACLE_OWNER" "$SOURCE_FILE"; then
-            echo "ERROR: Failed to change software source owner: $SOURCE_FILE"
-            return 1
-        fi
-        if ! SOURCE_OWNER="$(stat -Lc %U "$SOURCE_FILE")" ||
-           [ "$SOURCE_OWNER" != "$ORACLE_OWNER" ]; then
-            echo "ERROR: Software source owner verification failed: $SOURCE_FILE"
-            return 1
-        fi
-    fi
-
-    if ! runuser -u "$ORACLE_OWNER" -- test -r "$SOURCE_FILE"; then
-        echo "ERROR: $ORACLE_OWNER cannot read: $SOURCE_FILE"
-        return 1
-    fi
-}
-
-version_is_at_least() {
-    local CURRENT_VERSION="$1"
-    local MINIMUM_VERSION="$2"
-
-    printf '%s\n%s\n' "$MINIMUM_VERSION" "$CURRENT_VERSION" |
-        LC_ALL=C sort -V -C
-}
-
-get_opatch_version() {
-    runuser -u "$ORACLE_OWNER" -- "$ORACLE_HOME/OPatch/opatch" version 2>/dev/null |
-        awk '/^OPatch Version:/ { print $3; exit }'
-}
-
-verify_ru_applied() {
-    local PATCH_LIST
-
-    if ! PATCH_LIST="$(runuser -u "$ORACLE_OWNER" -- "$ORACLE_HOME/OPatch/opatch" lspatches)"; then
-        echo "ERROR: Failed to read the Oracle Home patch inventory."
-        return 1
-    fi
-
-    printf '%s\n' "$PATCH_LIST"
-    if ! printf '%s\n' "$PATCH_LIST" | grep -Fq "$RU_PATCH_ID"; then
-        echo "ERROR: Release Update patch is not present in the Oracle Home: $RU_PATCH_ID"
-        return 1
-    fi
-
-    return 0
 }
 
 show_oracle_limit() {
@@ -264,8 +192,6 @@ fi
 
 require_command runuser
 check_marker_file "$EXTRACT_MARKER"
-check_marker_file "$OPATCH_MARKER"
-check_marker_file "$RU_EXTRACT_MARKER"
 check_marker_file "$INSTALL_MARKER"
 check_marker_file "$ORAINST_ROOT_MARKER"
 check_marker_file "$ROOT_SH_MARKER"
@@ -361,7 +287,6 @@ fi
 echo "=== Installation settings ==="
 echo "Configuration: $CONFIG_FILE"
 echo "Oracle Home: $ORACLE_HOME; Base: $ORACLE_BASE; timezone: $TIMEZONE"
-echo "Release Update: $RU_VERSION; patch ID: $RU_PATCH_ID"
 echo "root.sh local bin: $LOCAL_BIN_DIR; existing helper scripts will be preserved."
 if [ "$CREATE_DB" -eq 1 ]; then
     echo "Mode: software and database; SID: $ORACLE_SID; Listener: LSNR_$ORACLE_SID:$LISTENER_PORT"
@@ -371,29 +296,6 @@ if [ "$CREATE_DB" -eq 1 ]; then
 else
     echo "Mode: software only; no Listener or database will be created."
 fi
-
-echo ""
-echo "=== Mandatory PreCheck ==="
-
-if [ -L "$PRECHECK_SCRIPT" ] || [ ! -f "$PRECHECK_SCRIPT" ]; then
-    echo "ERROR: PreCheck must be a regular file: $PRECHECK_SCRIPT"
-    exit 1
-fi
-
-if [ "$CREATE_DB" -eq 1 ]; then
-    if ! bash "$PRECHECK_SCRIPT" --create-db \
-        --sid "$ORACLE_SID" --listener-port "$LISTENER_PORT"; then
-        echo "ERROR: Mandatory PreCheck failed. No system changes were made."
-        exit 1
-    fi
-else
-    if ! bash "$PRECHECK_SCRIPT"; then
-        echo "ERROR: Mandatory PreCheck failed. No system changes were made."
-        exit 1
-    fi
-fi
-
-echo "Mandatory PreCheck completed successfully."
 
 CURRENT_STAGE="software installation"
 # BEGIN SOFTWARE INSTALLATION
@@ -430,11 +332,6 @@ if [ -f "$INSTALL_MARKER" ]; then
        ! grep -Fq "LOC=\"$ORACLE_HOME\"" "$INVENTORY_FILE"; then
         echo "ERROR: Installer completion marker exists, but Inventory registration is missing."
         echo "Review Oracle Home and Inventory before rerunning this script."
-        exit 1
-    fi
-    if [ ! -f "$OPATCH_MARKER" ] || [ ! -f "$RU_EXTRACT_MARKER" ]; then
-        echo "ERROR: Installer completion exists without OPatch or RU extraction completion."
-        echo "This script does not adopt an existing or partially patched Oracle Home."
         exit 1
     fi
     INSTALL_REQUIRED="N"
@@ -615,7 +512,7 @@ else
 fi
 
 # Configure new directories only; preserve existing ownership and permissions.
-for ORACLE_DIR in "$SOFTWARE_SOURCE_DIR" "$PATCH_STAGE_DIR" "$ORACLE_BASE" "$ORACLE_HOME"; do
+for ORACLE_DIR in "$SOFTWARE_SOURCE_DIR" "$ORACLE_BASE" "$ORACLE_HOME"; do
     if [ "$ORACLE_DIR" -ef "$ORA_INVENTORY" ]; then
         continue
     fi
@@ -639,8 +536,7 @@ for ORACLE_DIR in "$SOFTWARE_SOURCE_DIR" "$PATCH_STAGE_DIR" "$ORACLE_BASE" "$ORA
         echo "ERROR: $ORACLE_OWNER cannot access directory: $ORACLE_DIR"
         exit 1
     fi
-    if [ "$ORACLE_DIR" = "$PATCH_STAGE_DIR" ] ||
-       [ "$ORACLE_DIR" = "$ORACLE_BASE" ] || [ "$ORACLE_DIR" = "$ORACLE_HOME" ]; then
+    if [ "$ORACLE_DIR" = "$ORACLE_BASE" ] || [ "$ORACLE_DIR" = "$ORACLE_HOME" ]; then
         if ! runuser -u "$ORACLE_OWNER" -- test -r "$ORACLE_DIR" ||
            ! runuser -u "$ORACLE_OWNER" -- test -w "$ORACLE_DIR"; then
             echo "ERROR: $ORACLE_OWNER cannot read or write directory: $ORACLE_DIR"
@@ -650,7 +546,6 @@ for ORACLE_DIR in "$SOFTWARE_SOURCE_DIR" "$PATCH_STAGE_DIR" "$ORACLE_BASE" "$ORA
 done
 
 echo "Directory is ready: $SOFTWARE_SOURCE_DIR"
-echo "Directory is ready: $PATCH_STAGE_DIR"
 echo "Directory is ready: $ORACLE_BASE"
 echo "Directory is ready: $ORACLE_HOME"
 echo "Directory is ready: $ORA_INVENTORY"
@@ -906,7 +801,31 @@ else
     fi
 
     require_command unzip
-    if ! prepare_oracle_source_file "$SOFTWARE_SOURCE_DIR/$ZIP_FILE"; then
+
+    if ! ZIP_OWNER="$(stat -Lc %U "$SOFTWARE_SOURCE_DIR/$ZIP_FILE")"; then
+        echo "ERROR: Failed to check ZIP file owner."
+        exit 1
+    fi
+
+    if [ "$ZIP_OWNER" = "$ORACLE_OWNER" ]; then
+        echo "ZIP file owner is already $ORACLE_OWNER. Skipping ownership change."
+    else
+        echo "Changing ZIP file owner from $ZIP_OWNER to $ORACLE_OWNER..."
+        if ! chown "$ORACLE_OWNER" "$SOFTWARE_SOURCE_DIR/$ZIP_FILE"; then
+            echo "ERROR: Failed to change ZIP file owner."
+            exit 1
+        fi
+
+        if ! ZIP_OWNER="$(stat -Lc %U "$SOFTWARE_SOURCE_DIR/$ZIP_FILE")" ||
+           [ "$ZIP_OWNER" != "$ORACLE_OWNER" ]; then
+            echo "ERROR: ZIP file owner verification failed."
+            exit 1
+        fi
+        echo "ZIP file owner was changed to $ORACLE_OWNER."
+    fi
+
+    if ! runuser -u "$ORACLE_OWNER" -- test -r "$SOFTWARE_SOURCE_DIR/$ZIP_FILE"; then
+        echo "ERROR: $ORACLE_OWNER cannot read: $SOFTWARE_SOURCE_DIR/$ZIP_FILE"
         exit 1
     fi
 
@@ -955,124 +874,7 @@ fi
 echo "Installer path: $ORACLE_HOME/runInstaller"
 
 echo ""
-echo "=== 14. Update OPatch ==="
-
-if [ -f "$OPATCH_MARKER" ]; then
-    if ! IFS= read -r RECORDED_OPATCH_VERSION < "$OPATCH_MARKER" ||
-       [ -z "$RECORDED_OPATCH_VERSION" ]; then
-        echo "ERROR: OPatch completion marker has no version: $OPATCH_MARKER"
-        exit 1
-    fi
-    if [ ! -x "$ORACLE_HOME/OPatch/opatch" ]; then
-        echo "ERROR: OPatch marker exists but the executable is missing."
-        exit 1
-    fi
-    ACTUAL_OPATCH_VERSION="$(get_opatch_version)"
-    if [ -z "$ACTUAL_OPATCH_VERSION" ] ||
-       [ "$ACTUAL_OPATCH_VERSION" != "$RECORDED_OPATCH_VERSION" ] ||
-       ! version_is_at_least "$ACTUAL_OPATCH_VERSION" "$OPATCH_MINIMUM_VERSION"; then
-        echo "ERROR: OPatch marker and installed OPatch version are inconsistent."
-        echo "Recorded: $RECORDED_OPATCH_VERSION; actual: ${ACTUAL_OPATCH_VERSION:-unknown}"
-        exit 1
-    fi
-    echo "OPatch update already completed. Version: $ACTUAL_OPATCH_VERSION"
-else
-    if [ "$INSTALL_REQUIRED" = "N" ]; then
-        echo "ERROR: Installed Oracle Home has no OPatch completion marker."
-        echo "This script does not patch an existing Oracle Home."
-        exit 1
-    fi
-    if [ -e "$OPATCH_BACKUP_DIR" ] || [ -L "$OPATCH_BACKUP_DIR" ]; then
-        echo "ERROR: OPatch backup exists without a completion marker: $OPATCH_BACKUP_DIR"
-        echo "Review the interrupted OPatch update before rerunning this script."
-        exit 1
-    fi
-    if [ ! -d "$ORACLE_HOME/OPatch" ]; then
-        echo "ERROR: Base OPatch directory is missing: $ORACLE_HOME/OPatch"
-        exit 1
-    fi
-    require_command unzip
-    if ! prepare_oracle_source_file "$SOFTWARE_SOURCE_DIR/$OPATCH_ZIP"; then
-        exit 1
-    fi
-    if ! runuser -u "$ORACLE_OWNER" -- mv "$ORACLE_HOME/OPatch" "$OPATCH_BACKUP_DIR"; then
-        echo "ERROR: Failed to preserve the base OPatch directory."
-        exit 1
-    fi
-    if ! runuser -u "$ORACLE_OWNER" -- unzip -q "$SOFTWARE_SOURCE_DIR/$OPATCH_ZIP" -d "$ORACLE_HOME"; then
-        echo "ERROR: OPatch update failed. No completion marker was created."
-        echo "The base OPatch directory is preserved at: $OPATCH_BACKUP_DIR"
-        exit 1
-    fi
-    if [ ! -x "$ORACLE_HOME/OPatch/opatch" ]; then
-        echo "ERROR: Updated OPatch executable is missing: $ORACLE_HOME/OPatch/opatch"
-        exit 1
-    fi
-    ACTUAL_OPATCH_VERSION="$(get_opatch_version)"
-    if [ -z "$ACTUAL_OPATCH_VERSION" ] ||
-       ! version_is_at_least "$ACTUAL_OPATCH_VERSION" "$OPATCH_MINIMUM_VERSION"; then
-        echo "ERROR: OPatch version does not meet the required minimum."
-        echo "Required: $OPATCH_MINIMUM_VERSION; actual: ${ACTUAL_OPATCH_VERSION:-unknown}"
-        exit 1
-    fi
-    if ! runuser -u "$ORACLE_OWNER" -- bash -c 'printf "%s\n" "$1" > "$2"' \
-        bash "$ACTUAL_OPATCH_VERSION" "$OPATCH_MARKER"; then
-        echo "ERROR: Failed to create the OPatch completion marker."
-        exit 1
-    fi
-    echo "OPatch update completed. Version: $ACTUAL_OPATCH_VERSION"
-    echo "Base OPatch backup: $OPATCH_BACKUP_DIR"
-fi
-
-echo ""
-echo "=== 15. Extract Oracle Database Release Update $RU_VERSION ==="
-
-if [ -f "$RU_EXTRACT_MARKER" ]; then
-    if ! IFS= read -r RECORDED_RU_PATCH_ID < "$RU_EXTRACT_MARKER" ||
-       [ "$RECORDED_RU_PATCH_ID" != "$RU_PATCH_ID" ]; then
-        echo "ERROR: RU extraction marker does not match patch ID $RU_PATCH_ID."
-        exit 1
-    fi
-    if [ ! -f "$RU_PATCH_DIR/etc/config/inventory" ]; then
-        echo "ERROR: RU marker exists but the extracted patch inventory is missing."
-        echo "$RU_PATCH_DIR/etc/config/inventory"
-        exit 1
-    fi
-    echo "Release Update was already extracted. Patch ID: $RU_PATCH_ID"
-else
-    if [ "$INSTALL_REQUIRED" = "N" ]; then
-        echo "ERROR: Installed Oracle Home has no RU extraction completion marker."
-        echo "This script does not patch an existing Oracle Home."
-        exit 1
-    fi
-    if [ -e "$RU_PATCH_DIR" ] || [ -L "$RU_PATCH_DIR" ]; then
-        echo "ERROR: RU patch directory exists without a completion marker: $RU_PATCH_DIR"
-        echo "Review the interrupted extraction before rerunning this script."
-        exit 1
-    fi
-    require_command unzip
-    if ! prepare_oracle_source_file "$SOFTWARE_SOURCE_DIR/$RU_ZIP"; then
-        exit 1
-    fi
-    if ! runuser -u "$ORACLE_OWNER" -- unzip -q "$SOFTWARE_SOURCE_DIR/$RU_ZIP" -d "$PATCH_STAGE_DIR"; then
-        echo "ERROR: Release Update extraction failed. No completion marker was created."
-        exit 1
-    fi
-    if [ ! -f "$RU_PATCH_DIR/etc/config/inventory" ]; then
-        echo "ERROR: Extracted RU patch inventory is missing."
-        echo "$RU_PATCH_DIR/etc/config/inventory"
-        exit 1
-    fi
-    if ! runuser -u "$ORACLE_OWNER" -- bash -c 'printf "%s\n" "$1" > "$2"' \
-        bash "$RU_PATCH_ID" "$RU_EXTRACT_MARKER"; then
-        echo "ERROR: Failed to create the RU extraction completion marker."
-        exit 1
-    fi
-    echo "Release Update extraction completed. Patch ID: $RU_PATCH_ID"
-fi
-
-echo ""
-echo "=== 16. Install Oracle Database 19c software with RU $RU_VERSION ==="
+echo "=== 14. Install Oracle Database 19c software ==="
 
 if [ ! -f "$ORACLE_HOME/runInstaller" ]; then
     echo "ERROR: runInstaller was not found: $ORACLE_HOME/runInstaller"
@@ -1085,26 +887,16 @@ if [ "$INSTALL_REQUIRED" = "N" ]; then
 fi
 
 if [ "$INSTALL_REQUIRED" = "Y" ]; then
-    BUG_29772579_DETECTED=0
     BUG_29772579_OPTION=""
     if [ "$ID" = "ol" ] && [ "${VERSION_ID%%.*}" = "8" ]; then
         if rpm -q compat-libcap1 >/dev/null 2>&1; then
             echo "compat-libcap1 is installed. Oracle Bug 29772579 workaround is not required."
         else
-            BUG_29772579_DETECTED=1
+            BUG_29772579_OPTION="-ignorePrereqFailure"
             echo "Oracle Bug 29772579 condition detected on Oracle Linux 8."
-            echo "compat-libcap1 is not installed."
+            echo "compat-libcap1 is not installed; enable the documented prerequisite workaround."
+            echo "All other prerequisite failures must still be resolved."
         fi
-    fi
-
-    if [ "$BUG_29772579_DETECTED" -eq 1 ]; then
-        BUG_29772579_OPTION="-ignorePrereqFailure"
-        echo "Enable -ignorePrereqFailure for Oracle Bug 29772579 only."
-    fi
-
-    if [ -n "$BUG_29772579_OPTION" ] && [ "$BUG_29772579_DETECTED" -ne 1 ]; then
-        echo "ERROR: -ignorePrereqFailure is not allowed without Oracle Bug 29772579."
-        exit 1
     fi
 
     su - "$ORACLE_OWNER" -c "
@@ -1116,7 +908,6 @@ if [ "$INSTALL_REQUIRED" = "Y" ]; then
         ./runInstaller $BUG_29772579_OPTION \
             -silent \
             -waitforcompletion \
-            -applyRU \"$RU_PATCH_DIR\" \
             oracle.install.option=INSTALL_DB_SWONLY \
             UNIX_GROUP_NAME=\"$INVENTORY_GROUP\" \
             INVENTORY_LOCATION=\"$ORA_INVENTORY\" \
@@ -1154,11 +945,6 @@ if [ "$INSTALL_REQUIRED" = "Y" ]; then
         exit 1
     fi
 
-    if ! verify_ru_applied; then
-        echo "ERROR: Installer completed but RU $RU_PATCH_ID verification failed."
-        exit 1
-    fi
-
     if ! IFS= read -r INSTALL_BATCH_ID < /proc/sys/kernel/random/uuid ||
        [ -z "$INSTALL_BATCH_ID" ]; then
         echo "ERROR: Installer succeeded, but an installation batch ID could not be generated."
@@ -1174,15 +960,8 @@ if [ "$INSTALL_REQUIRED" = "Y" ]; then
     echo "Oracle Database 19c software installation completed."
 fi
 
-if [ "$INSTALL_REQUIRED" = "N" ]; then
-    if ! verify_ru_applied; then
-        echo "ERROR: Installer marker exists but the configured RU is not applied."
-        exit 1
-    fi
-fi
-
 echo ""
-echo "=== 17. Run orainstRoot.sh ==="
+echo "=== 15. Run orainstRoot.sh ==="
 
 if [ -f "$ORAINST_ROOT_MARKER" ]; then
     echo "orainstRoot.sh already completed. Skip."
@@ -1208,7 +987,7 @@ fi
 
 
 echo ""
-echo "=== 18. Run root.sh ==="
+echo "=== 16. Run root.sh ==="
 
 if [ -f "$ROOT_SH_MARKER" ]; then
     echo "root.sh already completed. Skip."
@@ -1257,11 +1036,9 @@ if [ ! -f "$INVENTORY_FILE" ] ||
     exit 1
 fi
 echo "Installer marker: $INSTALL_MARKER"
-echo "OPatch marker: $OPATCH_MARKER"
-echo "RU extraction marker: $RU_EXTRACT_MARKER"
 echo "orainstRoot.sh marker: $ORAINST_ROOT_MARKER"
 echo "root.sh marker: $ROOT_SH_MARKER"
-echo "Oracle Database 19c software with RU $RU_VERSION is registered in Inventory."
+echo "Oracle Database 19c software is registered in Inventory."
 
 echo ""
 # END SOFTWARE INSTALLATION
@@ -1721,7 +1498,6 @@ ORACLE_DATABASE_SCRIPT
     fi
     if ! runuser -u "$ORACLE_OWNER" -- env \
         ORACLE_BASE="$ORACLE_BASE" ORACLE_HOME="$ORACLE_HOME" ORACLE_SID="$ORACLE_SID" \
-        OPATCH_MINIMUM_VERSION="$OPATCH_MINIMUM_VERSION" RU_PATCH_ID="$RU_PATCH_ID" \
         TNS_ADMIN="$ORACLE_HOME/network/admin" LD_LIBRARY_PATH="$ORACLE_HOME/lib" \
         bash "$POSTCHECK_SCRIPT" "$ORACLE_SID" "$LISTENER_PORT" \
         "$DB_HOST" "$DB_SERVICE" "$DB_SECRET_DIR"; then
