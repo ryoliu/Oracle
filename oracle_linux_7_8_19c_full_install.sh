@@ -118,24 +118,11 @@ disable_service() {
     fi
 }
 
-# Prefer /etc/localtime because timedatectl output differs slightly between
-# Oracle Linux releases and locales.
+# Read the current timezone on Oracle Linux 8.
 get_current_timezone() {
-    CURRENT_TIMEZONE=""
-    TIMEZONE_TARGET="$(readlink -f /etc/localtime 2>/dev/null)"
-
-    case "$TIMEZONE_TARGET" in
-        /usr/share/zoneinfo/*)
-            CURRENT_TIMEZONE="${TIMEZONE_TARGET#/usr/share/zoneinfo/}"
-            ;;
-    esac
-
-    if [ -z "$CURRENT_TIMEZONE" ]; then
-        CURRENT_TIMEZONE="$(LC_ALL=C timedatectl 2>/dev/null | awk '
-            /^[[:space:]]*Time zone:/ { print $3; exit }
-            /^[[:space:]]*Timezone:/ { print $2; exit }
-        ')"
-    fi
+    CURRENT_TIMEZONE="$(LC_ALL=C timedatectl 2>/dev/null | awk '
+        /^[[:space:]]*Time zone:/ { print $3; exit }
+    ')"
 
     [ -n "$CURRENT_TIMEZONE" ]
 }
