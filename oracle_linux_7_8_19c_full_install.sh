@@ -9,6 +9,7 @@ unset ORACLE_PASSWORD DB_PASSWORD PASSWORD_CONFIRM DB_PASSWORD_RSP
 # The Oracle 19c ZIP can be copied by root before ORACLE_OWNER exists.
 # OS preparation and root scripts run as root; extraction and installation run as ORACLE_OWNER.
 # OL8 installation assumes acceptance of CV_ASSUME_DISTID=OL7 for the 19.3 media.
+# The Bug 29772579 prerequisite workaround is enabled only when OL8 lacks compat-libcap1.
 # This script does not apply an RU or verify OS/kernel/Oracle certification.
 
 if ! SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; then
@@ -72,6 +73,69 @@ check_marker_file() {
         echo "ERROR: Completion marker must be a regular file: $MARKER_FILE"
         exit 1
     fi
+}
+
+show_oracle_limit() {
+    local LIMIT_LABEL="$1"
+    local LIMIT_OPTION="$2"
+    local LIMIT_VALUE
+
+    if ! LIMIT_VALUE="$(runuser -u "$ORACLE_OWNER" -- bash -c 'ulimit "$1"' bash "$LIMIT_OPTION")"; then
+        echo "ERROR: Failed to read Oracle user limit: $LIMIT_LABEL"
+        exit 1
+    fi
+
+    echo "$LIMIT_LABEL: $LIMIT_VALUE"
+}
+
+disable_service() {
+    local SERVICE_NAME="$1"
+    local SERVICE_ACTIVE
+    local SERVICE_ENABLED
+
+    if printf '%s\n' "$SERVICE_UNITS" | grep -q "^${SERVICE_NAME}\.service[[:space:]]"; then
+        echo "Stopping and disabling $SERVICE_NAME..."
+
+        if ! systemctl stop "$SERVICE_NAME" ||
+           ! systemctl disable "$SERVICE_NAME"; then
+            echo "ERROR: Failed to stop or disable $SERVICE_NAME."
+            exit 1
+        fi
+
+        SERVICE_ACTIVE="$(systemctl is-active "$SERVICE_NAME" 2>/dev/null)"
+        SERVICE_ENABLED="$(systemctl is-enabled "$SERVICE_NAME" 2>/dev/null)"
+
+        if [ "$SERVICE_ACTIVE" != "inactive" ] ||
+           { [ "$SERVICE_ENABLED" != "disabled" ] &&
+             [ "$SERVICE_ENABLED" != "masked" ]; }; then
+            echo "ERROR: $SERVICE_NAME stopped or disabled status verification failed."
+            exit 1
+        fi
+
+        echo "$SERVICE_NAME has been stopped and disabled."
+    else
+        echo "$SERVICE_NAME is not installed."
+    fi
+}
+
+get_current_timezone() {
+    CURRENT_TIMEZONE=""
+    TIMEZONE_TARGET="$(readlink -f /etc/localtime 2>/dev/null)"
+
+    case "$TIMEZONE_TARGET" in
+        /usr/share/zoneinfo/*)
+            CURRENT_TIMEZONE="${TIMEZONE_TARGET#/usr/share/zoneinfo/}"
+            ;;
+    esac
+
+    if [ -z "$CURRENT_TIMEZONE" ]; then
+        CURRENT_TIMEZONE="$(LC_ALL=C timedatectl 2>/dev/null | awk '
+            /^[[:space:]]*Time zone:/ { print $3; exit }
+            /^[[:space:]]*Timezone:/ { print $2; exit }
+        ')"
+    fi
+
+    [ -n "$CURRENT_TIMEZONE" ]
 }
 
 for SCRIPT_OPTION in "$@"; do
@@ -353,39 +417,29 @@ fi
 
 echo ""
 echo "Applying kernel parameters..."
-sysctl --system
-
-if [ $? -ne 0 ]; then
-    echo "Failed to apply kernel parameters."
+if ! sysctl --system; then
+    echo "ERROR: Failed to apply kernel parameters."
     exit 1
 fi
 
 echo ""
-echo "=== 4. Check Current Kernel Parameters ==="
+echo "=== 4. Verify Current Kernel Parameters ==="
 
-echo ""
-echo "fs.aio-max-nr:"
-sysctl fs.aio-max-nr
+for KERNEL_PARAMETER in \
+    fs.aio-max-nr \
+    fs.file-max \
+    kernel.sem \
+    kernel.shmmax \
+    kernel.shmall \
+    vm.nr_hugepages
+do
+    if ! sysctl "$KERNEL_PARAMETER"; then
+        echo "ERROR: Failed to read kernel parameter: $KERNEL_PARAMETER"
+        exit 1
+    fi
+done
 
-echo ""
-echo "fs.file-max:"
-sysctl fs.file-max
-
-echo ""
-echo "kernel.sem:"
-sysctl kernel.sem
-
-echo ""
-echo "kernel.shmmax:"
-sysctl kernel.shmmax
-
-echo ""
-echo "kernel.shmall:"
-sysctl kernel.shmall
-
-echo ""
-echo "vm.nr_hugepages:"
-sysctl vm.nr_hugepages
+echo "Kernel parameter verification completed successfully."
 
 echo ""
 echo "=== 5. Check Oracle User, Groups, and Directories ==="
@@ -499,42 +553,32 @@ echo "Directory is ready: $ORA_INVENTORY"
 echo "Oracle directories were configured successfully."
 
 echo ""
-echo "=== 6. Check Preinstall Limits Settings ==="
+echo "=== 6. Verify Preinstall Limits Settings ==="
 
-if [ -f "$LIMITS_FILE" ]; then
-    echo "Limits file exists:"
-    echo "$LIMITS_FILE"
-    grep -v "^#" "$LIMITS_FILE" | grep -v "^$"
-else
-    echo "WARNING: Oracle 19c limits file not found."
+if [ ! -r "$LIMITS_FILE" ]; then
+    echo "ERROR: Oracle 19c limits file is missing or unreadable: $LIMITS_FILE"
+    exit 1
+fi
+
+echo "Active limits settings: $LIMITS_FILE"
+if ! grep -Ev '^[[:space:]]*(#|$)' "$LIMITS_FILE"; then
+    echo "ERROR: Oracle 19c limits file has no active settings: $LIMITS_FILE"
+    exit 1
 fi
 
 echo ""
-echo "=== 7. Check Oracle User Current Limits ==="
+echo "=== 7. Verify Oracle User Current Limits ==="
 
-echo "Open files soft limit:"
-su - oracle -c "ulimit -Sn"
+show_oracle_limit "Open files soft limit" -Sn
+show_oracle_limit "Open files hard limit" -Hn
+show_oracle_limit "Processes soft limit" -Su
+show_oracle_limit "Processes hard limit" -Hu
+show_oracle_limit "Stack soft limit" -Ss
+show_oracle_limit "Stack hard limit" -Hs
+show_oracle_limit "Locked memory soft limit" -Sl
+show_oracle_limit "Locked memory hard limit" -Hl
 
-echo "Open files hard limit:"
-su - oracle -c "ulimit -Hn"
-
-echo "Processes soft limit:"
-su - oracle -c "ulimit -Su"
-
-echo "Processes hard limit:"
-su - oracle -c "ulimit -Hu"
-
-echo "Stack soft limit:"
-su - oracle -c "ulimit -Ss"
-
-echo "Stack hard limit:"
-su - oracle -c "ulimit -Hs"
-
-echo "Locked memory soft limit:"
-su - oracle -c "ulimit -Sl"
-
-echo "Locked memory hard limit:"
-su - oracle -c "ulimit -Hl"
+echo "Oracle user limit verification completed successfully."
 
 echo ""
 echo "=== 8. Disable SELinux ==="
@@ -596,36 +640,6 @@ if ! SERVICE_UNITS="$(systemctl list-unit-files --no-pager)"; then
     exit 1
 fi
 
-disable_service() {
-    local SERVICE_NAME="$1"
-    local SERVICE_ACTIVE
-    local SERVICE_ENABLED
-
-    if printf '%s\n' "$SERVICE_UNITS" | grep -q "^${SERVICE_NAME}\.service[[:space:]]"; then
-        echo "Stopping and disabling $SERVICE_NAME..."
-
-        if ! systemctl stop "$SERVICE_NAME" ||
-           ! systemctl disable "$SERVICE_NAME"; then
-            echo "ERROR: Failed to stop or disable $SERVICE_NAME."
-            exit 1
-        fi
-
-        SERVICE_ACTIVE="$(systemctl is-active "$SERVICE_NAME" 2>/dev/null)"
-        SERVICE_ENABLED="$(systemctl is-enabled "$SERVICE_NAME" 2>/dev/null)"
-
-        if [ "$SERVICE_ACTIVE" != "inactive" ] ||
-           { [ "$SERVICE_ENABLED" != "disabled" ] &&
-             [ "$SERVICE_ENABLED" != "masked" ]; }; then
-            echo "ERROR: $SERVICE_NAME stopped or disabled status verification failed."
-            exit 1
-        fi
-
-        echo "$SERVICE_NAME has been stopped and disabled."
-    else
-        echo "$SERVICE_NAME is not installed."
-    fi
-}
-
 disable_service firewalld
 
 echo ""
@@ -635,26 +649,6 @@ disable_service iptables
 
 echo ""
 echo "=== 11. Check timezone ==="
-
-get_current_timezone() {
-    CURRENT_TIMEZONE=""
-    TIMEZONE_TARGET="$(readlink -f /etc/localtime 2>/dev/null)"
-
-    case "$TIMEZONE_TARGET" in
-        /usr/share/zoneinfo/*)
-            CURRENT_TIMEZONE="${TIMEZONE_TARGET#/usr/share/zoneinfo/}"
-            ;;
-    esac
-
-    if [ -z "$CURRENT_TIMEZONE" ]; then
-        CURRENT_TIMEZONE="$(LC_ALL=C timedatectl 2>/dev/null | awk '
-            /^[[:space:]]*Time zone:/ { print $3; exit }
-            /^[[:space:]]*Timezone:/ { print $2; exit }
-        ')"
-    fi
-
-    [ -n "$CURRENT_TIMEZONE" ]
-}
 
 if ! get_current_timezone; then
     echo "ERROR: Failed to query the current timezone."
@@ -893,16 +887,27 @@ if [ "$INSTALL_REQUIRED" = "N" ]; then
 fi
 
 if [ "$INSTALL_REQUIRED" = "Y" ]; then
+    BUG_29772579_OPTION=""
+    if [ "$ID" = "ol" ] && [ "${VERSION_ID%%.*}" = "8" ]; then
+        if rpm -q compat-libcap1 >/dev/null 2>&1; then
+            echo "compat-libcap1 is installed. Oracle Bug 29772579 workaround is not required."
+        else
+            BUG_29772579_OPTION="-ignorePrereqFailure"
+            echo "Oracle Bug 29772579 condition detected on Oracle Linux 8."
+            echo "compat-libcap1 is not installed; enable the documented prerequisite workaround."
+            echo "All other prerequisite failures must still be resolved."
+        fi
+    fi
+
     su - "$ORACLE_OWNER" -c "
         unset CV_ASSUME_DISTID
         if [ -n \"$INSTALLER_DISTID\" ]; then
             export CV_ASSUME_DISTID=\"$INSTALLER_DISTID\"
         fi
         cd \"$ORACLE_HOME\" &&
-        ./runInstaller \
+        ./runInstaller $BUG_29772579_OPTION \
             -silent \
             -waitforcompletion \
-            -ignorePrereqFailure \
             oracle.install.option=INSTALL_DB_SWONLY \
             UNIX_GROUP_NAME=\"$INVENTORY_GROUP\" \
             INVENTORY_LOCATION=\"$ORA_INVENTORY\" \

@@ -50,6 +50,9 @@ INSTALL_COMPLETE=0
 ORAINST_ROOT_COMPLETE=0
 ROOT_SH_COMPLETE=0
 INVENTORY_DECLARED=0
+TMP_MINIMUM_MB=1024
+ORACLE_SOFTWARE_MINIMUM_MB=7373
+ORACLE_SOFTWARE_RECOMMENDED_MB=102400
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -133,7 +136,7 @@ else
     FAIL_COUNT=$((FAIL_COUNT + 1))
 fi
 
-for REQUIRED_COMMAND in awk df find free getenforce getent grep hostname id ps rpm runuser sed sort ss stat sysctl systemctl timedatectl tr uname; do
+for REQUIRED_COMMAND in awk df dirname find free getenforce getent grep hostname id ps rpm runuser sed sort ss stat sysctl systemctl timedatectl tr uname; do
     if command -v "$REQUIRED_COMMAND" >/dev/null 2>&1; then
         echo "PASS: Required command is available: $REQUIRED_COMMAND"
         PASS_COUNT=$((PASS_COUNT + 1))
@@ -368,15 +371,33 @@ else
     WARN_COUNT=$((WARN_COUNT + 1))
 fi
 
-for CHECK_PATH in /tmp /dev/shm; do
-    if [ -d "$CHECK_PATH" ] && df -Pk "$CHECK_PATH" >/dev/null 2>&1; then
-        echo "PASS: Filesystem is available: $CHECK_PATH"
-        PASS_COUNT=$((PASS_COUNT + 1))
+if [ -d /tmp ]; then
+    TMP_AVAILABLE_MB="$(df -Pm /tmp 2>/dev/null | awk 'NR == 2 {print $4}')"
+    if [[ "$TMP_AVAILABLE_MB" =~ ^[0-9]+$ ]]; then
+        echo "INFO: /tmp available space is $TMP_AVAILABLE_MB MB."
+        if [ "$TMP_AVAILABLE_MB" -ge "$TMP_MINIMUM_MB" ]; then
+            echo "PASS: /tmp has at least 1 GB of available space."
+            PASS_COUNT=$((PASS_COUNT + 1))
+        else
+            echo "FAIL: /tmp must have at least 1 GB of available space."
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+        fi
     else
-        echo "FAIL: Filesystem is unavailable: $CHECK_PATH"
+        echo "FAIL: Cannot determine available space for /tmp."
         FAIL_COUNT=$((FAIL_COUNT + 1))
     fi
-done
+else
+    echo "FAIL: Filesystem path is unavailable: /tmp"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
+
+if [ -d /dev/shm ] && df -Pk /dev/shm >/dev/null 2>&1; then
+    echo "PASS: Filesystem is available: /dev/shm"
+    PASS_COUNT=$((PASS_COUNT + 1))
+else
+    echo "FAIL: Filesystem is unavailable: /dev/shm"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
 
 if id "$ORACLE_OWNER" >/dev/null 2>&1; then
     ORACLE_USER_EXISTS=1
@@ -466,6 +487,39 @@ elif [ -f "$INVENTORY_FILE" ] && grep -Fq "LOC=\"$ORACLE_HOME\"" "$INVENTORY_FIL
 else
     echo "WARN: Oracle software installation has not completed."
     WARN_COUNT=$((WARN_COUNT + 1))
+fi
+
+echo ""
+echo "--- Oracle Home filesystem capacity ---"
+
+ORACLE_HOME_CHECK_PATH="$ORACLE_HOME"
+while [ ! -e "$ORACLE_HOME_CHECK_PATH" ]; do
+    PARENT_PATH="$(dirname "$ORACLE_HOME_CHECK_PATH")"
+    if [ "$PARENT_PATH" = "$ORACLE_HOME_CHECK_PATH" ]; then
+        break
+    fi
+    ORACLE_HOME_CHECK_PATH="$PARENT_PATH"
+done
+
+ORACLE_HOME_AVAILABLE_MB="$(df -Pm "$ORACLE_HOME_CHECK_PATH" 2>/dev/null | awk 'NR == 2 {print $4}')"
+if [[ "$ORACLE_HOME_AVAILABLE_MB" =~ ^[0-9]+$ ]]; then
+    echo "INFO: Oracle Home filesystem available space is $ORACLE_HOME_AVAILABLE_MB MB."
+    echo "INFO: Filesystem check path: $ORACLE_HOME_CHECK_PATH"
+    # Require 7.2 GB only before Oracle Home extraction.
+    if [ "$EXTRACT_COMPLETE" -eq 0 ] &&
+       [ "$ORACLE_HOME_AVAILABLE_MB" -lt "$ORACLE_SOFTWARE_MINIMUM_MB" ]; then
+        echo "FAIL: Oracle Home filesystem must have at least 7.2 GB available before extraction."
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+    elif [ "$ORACLE_HOME_AVAILABLE_MB" -lt "$ORACLE_SOFTWARE_RECOMMENDED_MB" ]; then
+        echo "WARN: Oracle Home filesystem has less than the recommended 100 GB of available space."
+        WARN_COUNT=$((WARN_COUNT + 1))
+    else
+        echo "PASS: Oracle Home filesystem has at least 100 GB of available space."
+        PASS_COUNT=$((PASS_COUNT + 1))
+    fi
+else
+    echo "FAIL: Cannot determine available space for Oracle Home: $ORACLE_HOME"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
 fi
 
 if [ "$INSTALL_COMPLETE" -eq 1 ] && [ "$EXTRACT_COMPLETE" -eq 0 ]; then
