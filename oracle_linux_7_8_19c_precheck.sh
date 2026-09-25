@@ -242,7 +242,7 @@ else
     FAIL_COUNT=$((FAIL_COUNT + 1))
 fi
 
-for REQUIRED_COMMAND in awk df dirname find free getenforce getent grep hostname id rpm runuser sed sort stat sysctl systemctl timedatectl tr uname; do
+for REQUIRED_COMMAND in awk df dirname find getenforce getent grep hostname id rpm runuser sed stat sysctl systemctl timedatectl tr uname; do
     if command -v "$REQUIRED_COMMAND" >/dev/null 2>&1; then
         echo "PASS: Required command is available: $REQUIRED_COMMAND"
         PASS_COUNT=$((PASS_COUNT + 1))
@@ -315,7 +315,8 @@ else
         echo "WARN: Verify this kernel and Oracle Database 19c combination in Oracle Certification."
         WARN_COUNT=$((WARN_COUNT + 1))
     elif ! command -v sort >/dev/null 2>&1; then
-        echo "WARN: Kernel minimum could not be evaluated because GNU sort is unavailable."
+        echo "FAIL: Required command is missing for kernel comparison: sort"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
     elif printf '%s\n%s\n' "$MINIMUM_KERNEL" "$KERNEL_RELEASE" | LC_ALL=C sort -V -C; then
         echo "PASS: Running kernel meets the documented minimum for $KERNEL_FAMILY: $KERNEL_RELEASE"
         echo "INFO: This checks the kernel minimum only; Oracle RU and full certification are not verified."

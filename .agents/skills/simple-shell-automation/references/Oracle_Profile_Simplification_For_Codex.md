@@ -7,7 +7,7 @@
 設計原則：
 
 - 簡單
-- 可重複執行
+- Profile 管理邏輯在同一次受支援的新安裝流程中可安全執行
 - 容易維護
 - 容易除錯
 - 不使用進階 Shell 技巧
@@ -87,10 +87,12 @@ DB_UNIQUE_NAME=$ORACLE_SID
 
 ### `~/.bash_alias`
 
-只放 DBA Alias。
+只放 DBA Alias。`ORADATA` 的路徑必須由 `oracle_install.conf` 的 `DATA_DIR` 產生，不得使用與設定值無關的 hard-coded storage root。
+
+以下範例假設 `DATA_DIR="/opt/oracle/oradata"`；顯示的是 Alias 產生後的實際內容，不是固定路徑標準。
 
 ```bash
-alias ORADATA="ls -lur /oradata/*_*/*/data/*.dbf"
+alias ORADATA="ls -lur /opt/oracle/oradata/*_*/*/data/*.dbf"
 alias ORAPS="ps -ef | grep -iv 'grep' | egrep -i -n 'smon|lsnr'; df -h | grep -i /ora"
 alias dba="sqlplus / as sysdba"
 ```
@@ -140,7 +142,7 @@ BASHPID
 ```
 
 2. 拒絕 symbolic link 或非 regular file。
-3. 安裝腳本必須可重複執行，重跑時不得覆蓋首次備份。
+3. Profile 寫入邏輯不得覆蓋首次備份；此規則不授權 Oracle Installer 跨次續跑。
 4. 固定由安裝腳本管理的 Profile 檔案，可以依專案規則覆蓋固定內容。
 5. 寫入後對每個 Bash Profile 檔案執行 `bash -n`。
 6. 必要操作失敗立即 `exit 1`。
@@ -159,4 +161,4 @@ BASHPID
 - 確認 `.bash_alias` 能正常使用。
 - 確認沒有重複或 recursive source。
 
-完成修改後，列出修改內容、修改原因、新的 Profile 載入順序，以及是否仍可安全重跑。
+完成修改後，列出修改內容、修改原因、新的 Profile 載入順序，以及是否符合一次性 Installer 的安全停止規則。

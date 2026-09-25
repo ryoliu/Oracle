@@ -27,14 +27,14 @@ description: 撰寫、修改及整合 Linux Shell/Bash 自動化腳本，採用�
 
 ## Oracle 專案參考
 
-- 修改本專案的 Oracle Linux 新機安裝、Oracle Database 19c 安裝、`runInstaller`、root scripts、Marker、`ORACLE_SID`、Listener、Database、PreCheck、PostCheck 或整體停止邏輯時，必須先完整讀取並遵守 [references/Oracle_New_Server_Install_Rerun_Rules_For_Codex.md](references/Oracle_New_Server_Install_Rerun_Rules_For_Codex.md)。此專案定位為一次性新機安裝工具；Oracle Software 檢查必須先於密碼、SID 與 Listener Port 輸入。Software 一旦判定已安裝，立即停止整支流程；只有 Software 尚未安裝時才允許檢查新的 SID、Listener Name 與 Listener Port。不得加入跨次續跑、Migration、接管、合併或自動修復。
+- 修改本專案的 Oracle Linux 新機安裝、Oracle Database 19c 安裝、`runInstaller`、root scripts、Marker、`ORACLE_SID`、Listener、Database、PreCheck、PostCheck 或整體停止邏輯時，必須先完整讀取並遵守 [references/Oracle_New_Server_Install_Rerun_Rules_For_Codex.md](references/Oracle_New_Server_Install_Rerun_Rules_For_Codex.md)。此專案定位為一次性新機安裝工具；Oracle Software 檢查必須先於密碼、SID 與 Listener Port 輸入。Software 一旦判定已安裝，立即停止整支流程；只有 Software 尚未安裝時才允許檢查新的 SID、Listener Name 與 Listener Port。不得加入跨次續跑、Migration、接管、合併或自動修復。本專案的「可安全重跑」只表示再次執行時會先偵測既有 Oracle Software，並在不修改既有環境的情況下停止；不代表跨次續跑，也不允許略過已完成階段後繼續安裝。
 - 修改 Oracle 安裝腳本中的使用者 Profile 管理、`.bash_profile`、`.bashrc`、`.oracle_env`、Host Profile 或 DBA Alias 時，必須先完整讀取並遵守 [references/Oracle_Profile_Simplification_For_Codex.md](references/Oracle_Profile_Simplification_For_Codex.md)。
 - 若同一修改同時涉及安裝流程與 Profile，必須同時讀取通用的新機安裝 Reference 與 Profile Reference。
 - 一般 Shell 任務不需要載入這些 Oracle 專案參考。
 
 ## 可重複執行的要求
 
-- 第二次執行不得重複新增設定、帳號、排程或其他資源；已符合目標時顯示「已設定，略過」。
+- 對一般可重跑的 Shell 工作，第二次執行不得重複新增設定、帳號、排程或其他資源；已符合目標時可顯示「已設定，略過」。Oracle 一次性 Installer 必須依 Oracle 專案規則安全停止，不適用 skip-and-continue。
 - 建目錄可使用 `mkdir -p`。修改設定時先判斷值，避免每次都使用 `>>` 重複附加。
 - 修改既有設定檔時保留無關內容；需要備份時採簡單方式保留首次備份，不在每次重跑時覆蓋原始備份。
 - 套件安裝使用符合 OS 的套件管理工具，不把「RPM 檔存在」當成「已安裝」。離線情境說明來源及依賴需求，不假設網際網路可用。

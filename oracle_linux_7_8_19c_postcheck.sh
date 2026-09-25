@@ -2,9 +2,10 @@
 
 # Read-only final health checks for Oracle Database 19c.
 #
-# The checks progress from the network listener to database identity:
+# The checks progress from the network listener to database identity and the
+# final kernel parameter state:
 #   Listener process -> TCP port -> service registration -> client tools
-#   -> password-based Easy Connect -> SYSDBA instance state
+#   -> password-based Easy Connect -> SYSDBA instance state -> kernel parameters
 # No configuration is changed by this script. The first failed check exits 1.
 
 ORACLE_SID="$1"
@@ -110,6 +111,23 @@ if ! printf '%s\n' "$DATABASE_STATUS" |
     exit 1
 fi
 printf '%s\n' "$DATABASE_STATUS"
+
+echo "=== 7. Verify Current Kernel Parameters ==="
+# Main verifies these values immediately after sysctl --system. PostCheck reads
+# them again so the final installation report includes the active kernel state.
+for KERNEL_PARAMETER in \
+    fs.aio-max-nr \
+    fs.file-max \
+    kernel.sem \
+    kernel.shmmax \
+    kernel.shmall \
+    vm.nr_hugepages
+do
+    if ! sysctl "$KERNEL_PARAMETER"; then
+        echo "ERROR: Failed to read kernel parameter: $KERNEL_PARAMETER"
+        exit 1
+    fi
+done
 
 echo "POSTCHECK RESULT: PASS"
 exit 0

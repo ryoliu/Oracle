@@ -9,7 +9,8 @@ unset ORACLE_PASSWORD DB_PASSWORD PASSWORD_CONFIRM DB_PASSWORD_RSP
 # The Oracle 19c ZIP can be copied by root before ORACLE_OWNER exists.
 # OS preparation and root scripts run as root; extraction and installation run as ORACLE_OWNER.
 # OL8 installation assumes acceptance of CV_ASSUME_DISTID=OL7 for the 19.3 media.
-# The Bug 29772579 prerequisite workaround is enabled only when OL8 lacks compat-libcap1.
+# The Bug 29772579 workaround is enabled only when OL8 lacks compat-libcap1.
+# When enabled, OUI can ignore all prerequisite failures, so log review is required.
 # This script does not apply an RU or verify OS/kernel/Oracle certification.
 #
 # Execution model for DBA review:
@@ -348,17 +349,25 @@ fi
 CURRENT_STAGE="software installation"
 # BEGIN SOFTWARE INSTALLATION
 
-# An existing oraInst.loc is authoritative for the Inventory path and group.
-# Do not rewrite or adopt an Inventory whose declared directory is missing.
+# oracle_install.conf is the only Inventory configuration source. An existing
+# oraInst.loc must match it exactly and is never adopted as a replacement value.
 INVENTORY_GROUP="$ORACLE_GROUP"
-if [ -f "$ORAINST_FILE" ]; then
+if [ -L "$ORAINST_FILE" ] ||
+   { [ -e "$ORAINST_FILE" ] && [ ! -f "$ORAINST_FILE" ]; }; then
+    echo "ERROR: oraInst.loc must be a regular file: $ORAINST_FILE"
+    exit 1
+elif [ -f "$ORAINST_FILE" ]; then
     EXISTING_ORA_INVENTORY="$(sed -n 's/^inventory_loc=//p' "$ORAINST_FILE")"
-    INVENTORY_GROUP="$(sed -n 's/^inst_group=//p' "$ORAINST_FILE")"
-    if [ -z "$EXISTING_ORA_INVENTORY" ] || [ -z "$INVENTORY_GROUP" ]; then
+    EXISTING_INVENTORY_GROUP="$(sed -n 's/^inst_group=//p' "$ORAINST_FILE")"
+    if [ -z "$EXISTING_ORA_INVENTORY" ] || [ -z "$EXISTING_INVENTORY_GROUP" ]; then
         echo "ERROR: oraInst.loc is missing inventory_loc or inst_group."
         exit 1
     fi
-    ORA_INVENTORY="$EXISTING_ORA_INVENTORY"
+    if [ "$EXISTING_ORA_INVENTORY" != "$ORA_INVENTORY" ] ||
+       [ "$EXISTING_INVENTORY_GROUP" != "$ORACLE_GROUP" ]; then
+        echo "ERROR: oraInst.loc does not match oracle_install.conf: $ORAINST_FILE"
+        exit 1
+    fi
     if [ ! -d "$ORA_INVENTORY" ]; then
         echo "ERROR: oraInst.loc points to a missing Inventory: $ORA_INVENTORY"
         exit 1
@@ -701,10 +710,11 @@ echo "=== 12. Configure Oracle User Profile ==="
 # The host profile is populated after database creation because it contains SID.
 echo "Switching to oracle user to configure shell startup files..."
 
-su - oracle -c "bash -s -- '$ORACLE_BASE' '$ORACLE_HOME'" <<'ORACLE_PROFILE_SCRIPT'
+su - oracle -c "bash -s -- '$ORACLE_BASE' '$ORACLE_HOME' '$DATA_DIR'" <<'ORACLE_PROFILE_SCRIPT'
 
 ORACLE_BASE_VALUE="$1"
 ORACLE_HOME_VALUE="$2"
+DATA_DIR_VALUE="$3"
 
 PROFILE_FILE="$HOME/.bash_profile"
 ALIAS_FILE="$HOME/.bash_alias"
@@ -733,8 +743,8 @@ done
 
 # These files use the fixed project standard on every run. They do not parse or
 # merge an unknown legacy Oracle profile.
-if ! cat > "$ALIAS_FILE" <<'EOF'
-alias ORADATA="ls -lur /oradata/*_*/*/data/*.dbf"
+if ! cat > "$ALIAS_FILE" <<EOF
+alias ORADATA="ls -lur $DATA_DIR_VALUE/*_*/*/data/*.dbf"
 alias ORAPS="ps -ef | grep -iv 'grep' | egrep -i -n 'smon|lsnr'; df -h | grep -i /ora"
 alias dba="sqlplus / as sysdba"
 EOF
@@ -885,8 +895,8 @@ if [ ! -f "$ORACLE_HOME/runInstaller" ]; then
     exit 1
 fi
 
-# -ignorePrereqFailure is enabled only for the documented OL8
-# compat-libcap1 false-positive condition associated with Bug 29772579.
+# Activation is limited to the documented OL8 compat-libcap1 condition associated
+# with Bug 29772579. The OUI option itself can ignore all prerequisite failures.
 BUG_29772579_OPTION=""
 if [ "$ID" = "ol" ] && [ "${VERSION_ID%%.*}" = "8" ]; then
     if rpm -q compat-libcap1 >/dev/null 2>&1; then
@@ -895,12 +905,14 @@ if [ "$ID" = "ol" ] && [ "${VERSION_ID%%.*}" = "8" ]; then
         BUG_29772579_OPTION="-ignorePrereqFailure"
         echo "Oracle Bug 29772579 condition detected on Oracle Linux 8."
         echo "compat-libcap1 is not installed; enable the documented prerequisite workaround."
-        echo "All other prerequisite failures must still be resolved."
+        echo "WARNING: -ignorePrereqFailure causes OUI to ignore all prerequisite failures."
+        echo "Project PreCheck passed, but it does not replace all OUI prerequisite checks."
+        echo "Review the Oracle installer log for every ignored prerequisite result."
     fi
 fi
 
-# Run Oracle Universal Installer as the software owner. Exit code 6 means
-# installation completed with prerequisite warnings and requires log review.
+# Run Oracle Universal Installer as the software owner. Exit code 6 means the
+# installation completed after prerequisite checks or warnings were ignored.
 su - "$ORACLE_OWNER" -c "
     unset CV_ASSUME_DISTID
     if [ -n \"$INSTALLER_DISTID\" ]; then
@@ -931,8 +943,9 @@ case "$INSTALL_STATUS" in
         echo "Oracle Database 19c software installation succeeded."
         ;;
     6)
-        echo "WARNING: Oracle Database 19c software installation succeeded with prerequisite warnings."
-        echo "Please review the Oracle installer log."
+        echo "WARNING: Oracle Database 19c installation completed after OUI ignored prerequisite results."
+        echo "Exit code 6 does not prove that only compat-libcap1 was ignored."
+        echo "Review the Oracle installer log before accepting this installation."
         ;;
     *)
         echo "ERROR: Oracle Database 19c software installation failed."
@@ -1193,32 +1206,24 @@ echo "=== Preflight: Check target database and files ==="
 LISTENER_MARKER="$TNS_ADMIN/.LSNR_${ORACLE_SID}_complete"
 DATABASE_MARKER="$ORACLE_BASE/.DB_${ORACLE_SID}_complete"
 
-# Database and Listener markers prove that these deployment identifiers were
-# used before. They are conflict evidence, not permission to reuse resources.
-if [ -e "$DATABASE_MARKER" ] || [ -L "$DATABASE_MARKER" ]; then
-    echo "ERROR: Oracle SID already exists or has existing database artifacts: $ORACLE_SID"
-    echo "Use a different ORACLE_SID and rerun the installer."
-    exit 1
-fi
-if [ -e "$LISTENER_MARKER" ] || [ -L "$LISTENER_MARKER" ]; then
-    echo "ERROR: Listener already exists: $LISTENER_NAME"
-    echo "Use a different ORACLE_SID and rerun the installer."
-    exit 1
-fi
-
-if ! REGISTERED_DB=$(awk -F: -v name="$DB_NAME" '$0 !~ /^[[:space:]]*#/ && toupper($1)==name {print}' /etc/oratab); then
+# Repeat only creation-blocking checks because the environment may have changed
+# since target PreCheck. Markers remain conflict evidence and never allow reuse.
+if [ ! -r /etc/oratab ] ||
+   ! REGISTERED_DB=$(awk -F: -v name="$DB_NAME" '$0 !~ /^[[:space:]]*#/ && toupper($1)==name {print}' /etc/oratab); then
+    echo "ERROR: Cannot inspect /etc/oratab before database creation."
     exit 1
 fi
 if ! PROCESSES=$(ps -eo args=); then
+    echo "ERROR: Cannot inspect running processes before database creation."
     exit 1
 fi
 if ! DB_FILES=$(find "$ORACLE_HOME/dbs" -maxdepth 1 \( -iname "spfile$ORACLE_SID.ora" -o -iname "init$ORACLE_SID.ora" -o -iname "orapw$ORACLE_SID" -o -iname "lk$ORACLE_SID" \) -print); then
+    echo "ERROR: Cannot inspect target database files in Oracle Home."
     exit 1
 fi
 
-# Main repeats the conflict checks immediately before resource creation. This
-# second layer protects against state changes after the mandatory PreCheck.
-if [ -n "$REGISTERED_DB" ] ||
+if [ -e "$DATABASE_MARKER" ] || [ -L "$DATABASE_MARKER" ] ||
+   [ -n "$REGISTERED_DB" ] ||
    printf '%s\n' "$PROCESSES" | grep -Eiq "^ora_pmon_$ORACLE_SID([[:space:]]|$)" ||
    [ -n "$DB_FILES" ]; then
     echo "ERROR: Oracle SID already exists or has existing database artifacts: $ORACLE_SID"
@@ -1227,18 +1232,9 @@ if [ -n "$REGISTERED_DB" ] ||
 fi
 
 for ROOT_DIR in "$DATA_DIR" "$FRA_DIR"; do
-    if [[ "$ROOT_DIR" != /* ]] || [ "$ROOT_DIR" = / ]; then
-        echo "ERROR: Use an absolute storage root other than /."
-        exit 1
-    fi
     if [ -L "$ROOT_DIR/$DB_UNIQUE_NAME" ] || [ -e "$ROOT_DIR/$DB_UNIQUE_NAME" ]; then
         echo "ERROR: Oracle SID already exists or has existing database artifacts: $ORACLE_SID"
         echo "Use a different ORACLE_SID and rerun the installer."
-        exit 1
-    fi
-    if [ -e "$ROOT_DIR" ] &&
-       { [ ! -d "$ROOT_DIR" ] || [ ! -r "$ROOT_DIR" ] || [ ! -x "$ROOT_DIR" ]; }; then
-        echo "ERROR: Cannot inspect storage root: $ROOT_DIR"
         exit 1
     fi
 done
@@ -1254,19 +1250,17 @@ if [ -e "$LISTENER_FILE" ]; then
         exit 1
     fi
     if ! CONFIG=$(sed 's/#.*//' "$LISTENER_FILE"); then
+        echo "ERROR: Failed to parse Listener configuration: $LISTENER_FILE"
         exit 1
     fi
     if printf '%s\n' "$CONFIG" | grep -Eiq '^[[:space:]]*IFILE[[:space:]]*='; then
         echo "ERROR: Review included Listener configuration manually before using this simple script."
         exit 1
     fi
-    if printf '%s\n' "$CONFIG" | grep -Eiq "^[[:space:]]*$LISTENER_NAME[[:space:]]*="; then
-        echo "ERROR: Listener already exists: $LISTENER_NAME"
-        echo "Use a different ORACLE_SID and rerun the installer."
-        exit 1
-    fi
 fi
-if printf '%s\n' "$PROCESSES" | grep -Eiq "(^|/)tnslsnr[[:space:]]+$LISTENER_NAME([[:space:]]|$)" ||
+if [ -e "$LISTENER_MARKER" ] || [ -L "$LISTENER_MARKER" ] ||
+   printf '%s\n' "$CONFIG" | grep -Eiq "^[[:space:]]*$LISTENER_NAME[[:space:]]*=" ||
+   printf '%s\n' "$PROCESSES" | grep -Eiq "(^|/)tnslsnr[[:space:]]+$LISTENER_NAME([[:space:]]|$)" ||
    "$ORACLE_HOME/bin/lsnrctl" status "$LISTENER_NAME" >/dev/null 2>&1; then
     echo "ERROR: Listener already exists: $LISTENER_NAME"
     echo "Use a different ORACLE_SID and rerun the installer."
@@ -1291,6 +1285,7 @@ echo "DATA: $DATA_DIR/$DB_UNIQUE_NAME; FRA: $FRA_DIR/$DB_UNIQUE_NAME"
 
 echo "=== 2. Create and start dedicated Listener ==="
 if ! mkdir -p "$TNS_ADMIN"; then
+    echo "ERROR: Failed to create Oracle network directory: $TNS_ADMIN"
     exit 1
 fi
 # Preserve the first Listener configuration backup. Build the new file in
@@ -1303,14 +1298,17 @@ if [ -f "$LISTENER_FILE" ] && [ ! -e "$LISTENER_BACKUP" ]; then
     fi
 fi
 if ! WORK_DIR=$(mktemp -d "$TNS_ADMIN/.create_db.XXXXXX"); then
+    echo "ERROR: Failed to create Listener work directory in: $TNS_ADMIN"
     exit 1
 fi
 if [ -f "$LISTENER_FILE" ]; then
     if ! cp -p "$LISTENER_FILE" "$WORK_DIR/listener.ora"; then
+        echo "ERROR: Failed to copy Listener configuration to the work directory."
         exit 1
     fi
 else
     if ! : > "$WORK_DIR/listener.ora" || ! chmod 640 "$WORK_DIR/listener.ora"; then
+        echo "ERROR: Failed to initialize the temporary Listener configuration."
         exit 1
     fi
 fi

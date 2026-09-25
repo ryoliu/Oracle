@@ -5,7 +5,9 @@
 ## 一般規則
 
 - Shell Script 必須保持簡單且容易閱讀。
-- Script 必須能安全地重複執行。
+- Script must be safe to invoke again.
+- For this one-time installer, an existing Oracle Software installation must cause a clean stop without modifying the environment.
+- Cross-run resume is not supported.
 - 除非確實有需要，否則不要使用進階 Shell 技巧。
 - 優先採用以下流程：\
   檢查目前狀態 → 必要時修改 → 驗證結果。

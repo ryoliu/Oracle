@@ -13,7 +13,7 @@
 
 設計目標：
 - 簡單
-- 可重複執行
+- 可安全再次呼叫；偵測到既有 Oracle Software 時立即停止
 - 容易維護
 - 容易除錯
 - 不使用進階 Shell 技巧
@@ -43,7 +43,11 @@ LINUX.X64_193000_db_home.zip
 
 這個測試版只用於驗證 19.3 Base Media 的安裝流程、重跑狀態、Listener、DBCA、PreCheck 與 PostCheck，不是正式環境的 Patch 或認證基準。
 
-Oracle Linux 8 的 Bug 29772579 例外必須維持原有限制：只有確認 Oracle Linux 8 缺少 `compat-libcap1` 時，才允許對 19.3 Base Installer 使用 `-ignorePrereqFailure`。不得把這個例外擴大成一般 prerequisite bypass。
+Oracle Linux 8 的 Bug 29772579 例外必須維持原有限制：只有確認 Oracle Linux 8 缺少 `compat-libcap1` 時，才允許對 19.3 Base Installer 加入 `-ignorePrereqFailure`。這項限制只約束選項的啟用條件；`-ignorePrereqFailure` 本身會讓 OUI 忽略所有 prerequisite check failures，無法限定只忽略 `compat-libcap1`。
+
+專案 PreCheck 可降低已知的 OS、Architecture、Kernel、Memory、Swap、Filesystem 與 Package 風險，但不能取代或完整重現 OUI prerequisite engine，也不得宣稱其他 OUI prerequisite failures 一定已解決。OUI 回傳 exit code `6` 時，必須清楚警告 DBA：安裝是在忽略 prerequisite results 後完成，且必須人工檢查 Oracle Installer log；不能把 code `6` 描述成只忽略 Bug 29772579。
+
+不得在其他 OS、其他缺少套件或一般 prerequisite failure 情境中啟用此選項，也不要加入脆弱的 Installer log parsing 來自動宣稱只有 `compat-libcap1` 失敗。
 
 未來取得 RU 與 OPatch 安裝檔後，必須先由 DBA 明確要求加入 Patch 流程，並先更新本 Reference，再設計 OPatch 更新、RU 解壓、`-applyRU`、Marker 與 Patch Inventory 驗證。不得因 Oracle 文件存在 RU 安裝方式，就自動把 RU 功能加入目前測試版。
 
@@ -93,6 +97,8 @@ LISTENER_PORT
 - FRA_DIR
 - Database Name
 - DB_UNIQUE_NAME
+
+`oracle_install.conf` 也是 Oracle Inventory path 與 group 的唯一設定來源。`/etc/oraInst.loc` 若已存在，只能用來驗證 `inventory_loc` 與 `inst_group` 是否分別等於設定檔的 `ORA_INVENTORY` 與 `ORACLE_GROUP`；不得用既有值覆寫設定變數或接管其他 Inventory。不一致時立即停止。
 
 ---
 
@@ -271,18 +277,29 @@ fi
 
 #### PreCheck 與 Main
 
-PreCheck 順序固定為：
+PreCheck 分為兩個階段。
+
+第一階段是 Oracle Software hard gate：
 
 ```text
-1. Oracle Software not already installed
-2. ORACLE_SID format valid
-3. ORACLE_SID not already used
-4. LISTENER_NAME not already used
-5. LISTENER_PORT valid
-6. LISTENER_PORT not currently in use
+Oracle Software 已安裝
+或 Software、Oracle Home、Inventory、Marker 處於部分完成、不一致或無法安全判斷的狀態
+→ 立即輸出 PRECHECK RESULT: FAIL
+→ exit 1
+→ 不執行其他 OS、SID、Listener、Database 或 Port 檢查
 ```
 
-第 1 項失敗時立即輸出 `PRECHECK RESULT: FAIL` 並停止，不得執行第 2 至第 6 項。其他任一項失敗同樣 `exit 1`。
+第二階段是 read-only prerequisite 與 target 檢查。Software hard gate 通過後，可以完成其餘檢查並累計 `PASS_COUNT`、`WARN_COUNT` 與 `FAIL_COUNT`，不需要因單一 target failure 立即退出。Target PreCheck 必須涵蓋：
+
+```text
+- ORACLE_SID format
+- LISTENER_PORT format
+- SID Marker、oratab、PMON、dbs、DATA、FRA 衝突
+- Listener Marker、listener.ora、Listener process、lsnrctl 衝突
+- Listener Port 使用狀態
+```
+
+依賴 SID 或 Listener Port 的檢查，在對應輸入格式無效時可以標示為未執行；不得使用無效輸入執行修改操作。完成 read-only 檢查後，只要 `FAIL_COUNT` 大於零，就必須輸出 `PRECHECK RESULT: FAIL` 並 `exit 1`。只有零 FAIL 才能讓 Main 繼續。
 
 Main Script 必須在真正建立 Listener／Database 前再次確認 SID、Listener Name 與 Listener Port 未被使用。PreCheck 是第一層防護，Main 是第二層防護；但 Software 已安裝時不得進入任何第二層檢查。
 
