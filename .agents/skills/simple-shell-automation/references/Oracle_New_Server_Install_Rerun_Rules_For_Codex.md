@@ -5,6 +5,7 @@
 本專案只處理 Oracle Linux 新機安裝與 Oracle Database 19c 新安裝。
 
 不處理：
+
 - 舊環境 Migration
 - 既有 Oracle Home 接管
 - 既有 Profile 合併
@@ -12,6 +13,7 @@
 - 手動安裝到一半後的未知狀態接管
 
 設計目標：
+
 - 簡單
 - 可安全再次呼叫；偵測到既有 Oracle Software 時立即停止
 - 容易維護
@@ -90,6 +92,7 @@ LISTENER_PORT
 只有確認 Oracle Software 尚未安裝後，才由 DBA 人工輸入這兩個值，完成格式與範圍驗證後，再由主安裝 Script 傳給後續步驟。不得從舊 Profile、`/etc/oratab`、舊 Listener 或其他既有設定反推輸入值。
 
 不要再解析舊設定來決定：
+
 - ORACLE_SID
 - ORACLE_HOME
 - Listener Port
@@ -121,6 +124,7 @@ Software 已安裝後重跑     → 不支援，立即停止
 遇到不符合預期的舊環境，直接 FAIL。
 
 不要加入複雜邏輯去：
+
 - 猜
 - merge
 - migrate
@@ -169,18 +173,43 @@ Oracle Inventory 已有目標 `ORACLE_HOME`、Installer completion Marker 存在
 
 如果 Software 尚未安裝，但發現 Oracle Home、Inventory 或 Marker 處於未知、部分完成或不一致狀態，同樣立即停止，交由 DBA 處理；不得自動重裝、修復或接管。
 
-### 4. Profile 管理
+### ### 4. Profile 管理
 
 Profile 採固定內容管理，不解析、merge 或 migration 舊 Profile。
 
 涉及以下檔案時：
 
 - `~/.bash_profile`
+
 - `~/.oracle_env`
+
 - `~/.bash_alias`
+
 - `~/.<hostname>.profile`
 
 必須完整讀取並遵守 [Oracle_Profile_Simplification_For_Codex.md](Oracle_Profile_Simplification_For_Codex.md)。該文件是 Profile 載入順序、檔案內容、備份、檔案型態與語法驗證的唯一詳細規格。
+
+其中 Host Profile (`~/.<hostname>.profile`) 屬於本專案管理的主機 Database identity 設定。
+
+Host Profile 規則：
+
+```text
+不存在→ 建立固定內容已存在且為 regular file→ 不建立備份→ 直接覆寫為本次安裝的固定內容symbolic link 或非 regular file→ FAIL→ DBA review
+```
+
+Host Profile 不進行：
+
+- legacy parsing
+
+- merge
+
+- migration
+
+- adoption
+
+- 首次備份
+
+直接覆寫 Host Profile 不代表支援既有 Oracle Database 接管。Oracle Software、SID、Listener 與 Database 的新安裝衝突檢查仍必須先通過；Host Profile 只能在本次受支援的新 Database 建立流程中寫入。
 
 ---
 
@@ -345,6 +374,7 @@ Database／Listener Marker 是已使用識別值的證據，不是允許 reuse �
 ```
 
 不要：
+
 - 自動接管未知目錄
 - 自動改既有 Oracle Home
 - 自動猜舊權限

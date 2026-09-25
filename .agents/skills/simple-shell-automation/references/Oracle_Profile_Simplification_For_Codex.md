@@ -131,34 +131,94 @@ BASHPID
 
 沒有任何檔案回頭 source 上層檔案時，不需要額外的 recursive loading 防護。
 
-## 必須保留的安全措施
+## ## 必須保留的安全措施
 
-1. 修改前建立一次性的首次備份，例如：
+1. 修改下列既有 Profile 檔案前，建立一次性的首次備份：
 
 ```text
-.bash_profile.pre_oracle_install.bak
-.oracle_env.pre_oracle_install.bak
-.bash_alias.pre_oracle_install.bak
+.bash_profile.pre_oracle_install.bak.oracle_env.pre_oracle_install.bak.bash_alias.pre_oracle_install.bak
 ```
 
-2. 拒絕 symbolic link 或非 regular file。
-3. Profile 寫入邏輯不得覆蓋首次備份；此規則不授權 Oracle Installer 跨次續跑。
+適用檔案：
+
+```text
+~/.bash_profile~/.oracle_env~/.bash_alias
+```
+
+首次備份已存在時不得覆蓋。
+
+2. Host Profile (`~/.<hostname>.profile`) 不使用首次備份。
+
+Host Profile 屬於本專案管理的主機 Database identity 設定，固定內容只有：
+
+```bash
+export ORACLE_SID=ORCLDB_NAME=$ORACLE_SIDDB_UNIQUE_NAME=$ORACLE_SID
+```
+
+Host Profile 的處理規則：
+
+```text
+不存在→ 建立已存在且為 regular file→ 不備份→ 直接覆寫固定內容symbolic link 或非 regular file→ FAIL
+```
+
+不得解析、merge、migration 或保留既有 Host Profile 內容。
+
+3. 所有 Profile 路徑都必須拒絕 symbolic link 或非 regular file。
+
+對 `~/.bash_profile`、`~/.oracle_env`、`~/.bash_alias`：
+
+```text
+regular file→ 可以依專案規則備份後覆寫symbolic link / 非 regular file→ FAIL
+```
+
+對 Host Profile：
+
+```text
+regular file→ 可以直接覆寫symbolic link / 非 regular file→ FAIL
+```
+
 4. 固定由安裝腳本管理的 Profile 檔案，可以依專案規則覆蓋固定內容。
+
+不解析或合併未知的舊 Oracle Profile 設定。
+
 5. 寫入後對每個 Bash Profile 檔案執行 `bash -n`。
+
 6. 必要操作失敗立即 `exit 1`。
-7. 錯誤訊息指出實際失敗的檔案或操作。
+
+7. 錯誤訊息必須指出實際失敗的檔案或操作。
+
+8. Host Profile 可以直接覆寫不代表允許接管既有 Oracle Database。
+
+Oracle Software、SID、Listener Name、Listener Port、Database artifact 等新安裝檢查仍必須遵守 `Oracle_New_Server_Install_Rerun_Rules_For_Codex.md`。
 
 ## 修改與驗證要求
 
 - 保留 `~/.oracle_env`、`~/.<hostname>.profile` 與 `~/.bash_alias`。
+
 - `.oracle_env` 不得 source `.bash_profile` 或 `.bashrc`。
+
 - 沒有 non-login shell 明確需求時，`.bashrc` 不參與 Oracle 環境載入。
-- 不要為縮短程式碼而移除首次備份、檔案型態檢查、`bash -n` 或錯誤處理。
+
+- `.bash_profile`、`.oracle_env`、`.bash_alias` 修改前保留首次備份。
+
+- Host Profile 不建立備份；既有 regular file 可以直接覆寫固定內容。
+
+- 所有 Profile 路徑仍必須拒絕 symbolic link 或非 regular file。
+
+- Host Profile 不做 parsing、merge、migration 或 adoption。
+
+- 不要為縮短程式碼而移除必要的檔案型態檢查、`bash -n` 或錯誤處理。
+
 - 不要使用進階 Shell 技巧。
+
 - 確認 login shell 能取得 `ORACLE_HOME`。
+
 - 確認 `PATH` 包含 `$ORACLE_HOME/bin`。
+
 - 確認 Host Profile 能設定 `ORACLE_SID`。
+
 - 確認 `.bash_alias` 能正常使用。
+
 - 確認沒有重複或 recursive source。
 
 完成修改後，列出修改內容、修改原因、新的 Profile 載入順序，以及是否符合一次性 Installer 的安全停止規則。
