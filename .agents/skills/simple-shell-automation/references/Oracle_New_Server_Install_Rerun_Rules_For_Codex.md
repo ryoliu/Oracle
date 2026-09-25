@@ -15,14 +15,17 @@
 設計目標：
 
 - 簡單
-- 可安全再次呼叫；偵測到既有 Oracle Software 時立即停止
+- 可安全再次呼叫；如果本次執行開始前已存在目標 Oracle Software，立即停止
 - 容易維護
 - 容易除錯
 - 不使用進階 Shell 技巧
 - 固定環境參數由 `oracle_install.conf` 提供
 - `ORACLE_SID` 與 `LISTENER_PORT` 由 DBA 執行時人工輸入
-- Oracle Software 已安裝時立即停止
-- 只有 Oracle Software 尚未安裝時才允許繼續新安裝
+- 本次執行開始前若已存在 Oracle Software，不得進入續跑流程
+- 只有本次執行開始時 Oracle Software 尚未安裝，才允許進入新的完整安裝流程
+
+> 本文件中的「既有 Oracle Software」或「Software 已安裝後重跑」是指 **本次 Main Script 啟動之前就已經存在** 的 Oracle Software。  
+> 本次 Main Script 自己成功完成 `runInstaller` 後，仍屬於同一次受支援的新安裝 invocation，必須繼續執行同一次流程中的 root scripts、Listener／Database creation-blocking checks、Database 建立與 PostCheck。
 
 ---
 
@@ -89,7 +92,7 @@ ORACLE_SID
 LISTENER_PORT
 ```
 
-只有確認 Oracle Software 尚未安裝後，才由 DBA 人工輸入這兩個值，完成格式與範圍驗證後，再由主安裝 Script 傳給後續步驟。不得從舊 Profile、`/etc/oratab`、舊 Listener 或其他既有設定反推輸入值。
+只有確認本次 Main Script 啟動時 Oracle Software 尚未安裝後，才由 DBA 人工輸入這兩個值，完成格式與範圍驗證後，再由主安裝 Script 傳給後續步驟。不得從舊 Profile、`/etc/oratab`、舊 Listener 或其他既有設定反推輸入值。
 
 不要再解析舊設定來決定：
 
@@ -101,7 +104,20 @@ LISTENER_PORT
 - Database Name
 - DB_UNIQUE_NAME
 
-`oracle_install.conf` 也是 Oracle Inventory path 與 group 的唯一設定來源。`/etc/oraInst.loc` 若已存在，只能用來驗證 `inventory_loc` 與 `inst_group` 是否分別等於設定檔的 `ORA_INVENTORY` 與 `ORACLE_GROUP`；不得用既有值覆寫設定變數或接管其他 Inventory。不一致時立即停止。
+`oracle_install.conf` 是 Oracle Inventory path 與 group 的唯一設定來源與 source of truth。
+
+`/etc/oraInst.loc` 若已存在，只能作為驗證資料：
+
+```text
+inventory_loc 必須等於 oracle_install.conf 的 ORA_INVENTORY
+inst_group    必須等於 oracle_install.conf 的 ORACLE_GROUP
+```
+
+不得使用 `/etc/oraInst.loc` 的值覆寫 `ORA_INVENTORY`、`ORACLE_GROUP` 或其他設定變數，也不得以其內容接管另一個 Inventory。
+
+如果 `/etc/oraInst.loc` 與 `oracle_install.conf` 不一致、內容缺失、無法安全讀取，必須在 Software hard gate 階段立即停止。
+
+Software hard gate 判斷 Oracle Inventory 時，也必須以 `oracle_install.conf` 的 `ORA_INVENTORY` 為目標 Inventory；`/etc/oraInst.loc` 只負責驗證一致性，不是替代設定來源。
 
 ---
 
@@ -110,15 +126,17 @@ LISTENER_PORT
 本專案的邊界：
 
 ```text
-全新主機                  → 支援
-Software 安裝前重跑       → 支援
-Software 已安裝後重跑     → 不支援，立即停止
+全新主機                                      → 支援
+本次執行開始前 Software 尚未安裝              → 支援新的完整安裝
+本次執行自己剛完成 Software 安裝              → 支援繼續同一次 invocation
+下一次執行發現 Software 已經存在              → 不支援續跑，立即停止
 
-舊 Oracle Home            → 不支援
-舊 Database               → 不支援
-舊 Listener               → 不支援
-舊 Profile Migration      → 不支援
-舊 Inventory 自動接管      → 不支援
+舊 Oracle Home                                → 不支援
+舊 Database                                   → 不支援
+既有 Target Listener                          → 不支援 reuse / adoption
+既有 unrelated Listener                       → 可以保留，但不得與本次 Listener Name / Port 衝突
+舊 Profile Migration                          → 不支援
+舊 Inventory 自動接管                         → 不支援
 ```
 
 遇到不符合預期的舊環境，直接 FAIL。
@@ -131,26 +149,33 @@ Software 已安裝後重跑     → 不支援，立即停止
 - adopt
 - repair
 
+保留既有 unrelated Listener configuration 不代表 Migration 或 adoption。它只能保持原內容不變，並且本次新 Listener 必須使用新的 Listener Name 與未使用的 Port。
+
 ---
 
-### 3. Oracle Software 是第一個停止條件
+### 3. Oracle Software 是本次執行開始時的第一個停止條件
 
 固定環境參數由 `oracle_install.conf` 提供；`ORACLE_SID` 與 `LISTENER_PORT` 使用 DBA 本次執行時輸入的值。
 
-PreCheck 必須先判斷 Oracle Software 是否已安裝。這項檢查必須位於 SID、Listener Port、作業系統密碼及 Database 密碼輸入之前。只要確認 Oracle Software 已安裝，就立即 `ERROR + exit 1`，不得把 Software 階段設為 SKIP 後繼續執行。
+PreCheck 必須先判斷 **本次執行開始前** 目標 Oracle Software 是否已安裝。這項檢查必須位於 SID、Listener Port、作業系統密碼及 Database 密碼輸入之前。
+
+只要確認本次執行開始前目標 Oracle Software 已安裝，就立即 `ERROR + exit 1`，不得把 Software 階段設為 SKIP 後繼續執行。
 
 判斷順序固定為：
 
 ```text
-Oracle Software 已安裝
+本次執行開始前 Oracle Software 已安裝
 → STOP
-→ 不做額外檢查
+→ 不做額外安裝階段檢查
+→ 不進入 SID / Listener / Database 新建流程
 
-Oracle Software 未安裝
-→ 才檢查 SID、Listener Name 與 Listener Port
+本次執行開始前 Oracle Software 未安裝
+→ 通過 Software hard gate
+→ 才允許檢查新的 SID、Listener Name 與 Listener Port
+→ 才允許進入新的完整安裝流程
 ```
 
-偵測到 Oracle Software 已安裝後，不得再檢查或處理：
+偵測到 **pre-existing Oracle Software** 後，不得再為了續跑或接管而檢查或處理：
 
 - RU
 - OPatch
@@ -164,27 +189,47 @@ Oracle Software 未安裝
 不再允許：
 
 ```text
-Software 已安裝
+下一次執行發現 Software 已安裝
 → SKIP software
 → 繼續建 Listener / Database
 ```
 
-Oracle Inventory 已有目標 `ORACLE_HOME`、Installer completion Marker 存在，或其他既有判斷已足以確認目標 Software 安裝完成時，都必須立即停止。停止後不得為了判斷是否可以接續而再驗證其他階段。
+Oracle Inventory 已有目標 `ORACLE_HOME`、Installer completion Marker 存在，或其他既有判斷已足以確認目標 Software 在本次執行開始前已經完成安裝時，都必須立即停止。停止後不得為了判斷是否可以接續而再驗證其他安裝階段。
 
-如果 Software 尚未安裝，但發現 Oracle Home、Inventory 或 Marker 處於未知、部分完成或不一致狀態，同樣立即停止，交由 DBA 處理；不得自動重裝、修復或接管。
+如果 Software 尚未安裝，但發現 Oracle Home、Inventory 或 Marker 處於未知、部分完成、不一致或無法安全判斷的狀態，同樣在 Software hard gate 階段立即停止，交由 DBA 處理；不得自動重裝、修復或接管。
 
-### ### 4. Profile 管理
+### 同一次 invocation 的例外
+
+以下情境不是 cross-run resume：
+
+```text
+本次 Main Script 啟動
+→ Software hard gate 確認目標 Software 尚未安裝
+→ Target PreCheck 通過
+→ 本次 Main Script 執行 runInstaller
+→ runInstaller 成功
+→ 本次 Main Script 執行 root scripts
+→ 本次 Main Script 再次執行 creation-blocking SID / Listener / Port checks
+→ 建立 Listener
+→ DBCA
+→ PostCheck
+```
+
+此時 Oracle Software 雖然已經存在，但它是 **本次 Main Script 自己剛安裝完成** 的結果，因此必須繼續同一次 invocation。
+
+不得把這個情境誤判為「Software 已安裝後重跑」。
+
+---
+
+### 4. Profile 管理
 
 Profile 採固定內容管理，不解析、merge 或 migration 舊 Profile。
 
 涉及以下檔案時：
 
 - `~/.bash_profile`
-
 - `~/.oracle_env`
-
 - `~/.bash_alias`
-
 - `~/.<hostname>.profile`
 
 必須完整讀取並遵守 [Oracle_Profile_Simplification_For_Codex.md](Oracle_Profile_Simplification_For_Codex.md)。該文件是 Profile 載入順序、檔案內容、備份、檔案型態與語法驗證的唯一詳細規格。
@@ -194,19 +239,24 @@ Profile 採固定內容管理，不解析、merge 或 migration 舊 Profile。
 Host Profile 規則：
 
 ```text
-不存在→ 建立固定內容已存在且為 regular file→ 不建立備份→ 直接覆寫為本次安裝的固定內容symbolic link 或非 regular file→ FAIL→ DBA review
+不存在
+→ 建立固定內容
+
+已存在且為 regular file
+→ 不建立備份
+→ 直接覆寫為本次安裝的固定內容
+
+symbolic link 或非 regular file
+→ FAIL
+→ DBA review
 ```
 
 Host Profile 不進行：
 
 - legacy parsing
-
 - merge
-
 - migration
-
 - adoption
-
 - 首次備份
 
 直接覆寫 Host Profile 不代表支援既有 Oracle Database 接管。Oracle Software、SID、Listener 與 Database 的新安裝衝突檢查仍必須先通過；Host Profile 只能在本次受支援的新 Database 建立流程中寫入。
@@ -218,16 +268,17 @@ Host Profile 不進行：
 `orainstRoot.sh` 與 `root.sh` 只屬於同一次全新安裝流程。它們可以在本次 Main Script 中依序執行並於成功後記錄 Marker，但不得用於下一次執行的續跑判斷。
 
 ```text
-本次 runInstaller 成功
+本次 Main Script 的 runInstaller 成功
 → 執行 orainstRoot.sh
 → 執行 root.sh
+→ 繼續同一次 invocation 的 Listener / Database 流程
 
-下一次執行偵測到 Software 已安裝
+下一次執行在 Software hard gate 偵測到 Software 已安裝
 → 立即 STOP
 → 不檢查 orainstRoot.sh 或 root.sh Marker
 ```
 
-不得使用 `INSTALL_REQUIRED=N`、Installer Marker 或 Inventory 將 Software 階段設成 SKIP，再繼續執行任何 root script、Listener 或 Database 工作。
+不得使用 `INSTALL_REQUIRED=N`、Installer Marker 或 Inventory 將 Software 階段設成 SKIP，再於 **下一次執行** 繼續任何 root script、Listener 或 Database 工作。
 
 可以保留下列 Marker 作為稽核與衝突證據：
 
@@ -237,13 +288,13 @@ ORAINST_ROOT_MARKER="$ORA_INVENTORY/.orainstRoot_complete"
 ROOT_SH_MARKER="$ORACLE_HOME/.root_sh_complete"
 ```
 
-只有對應步驟成功後才能建立 Marker。Marker 不代表下一次執行可以 SKIP 該階段並繼續；下一次執行只要確認 Oracle Software 已安裝，就立即停止，不得再檢查 root-script Marker。
+只有對應步驟成功後才能建立 Marker。Marker 不代表下一次執行可以 SKIP 該階段並繼續；下一次執行只要確認 Oracle Software 已經存在，就立即停止，不得再使用 root-script Marker 判斷是否可以補跑。
 
 不允許：
 
-- 使用 `INSTALL_REQUIRED=N` 繼續後續安裝階段。
-- 因 `ORAINST_ROOT_MARKER` 或 `ROOT_SH_MARKER` 不存在而補跑 root scripts。
-- 使用 `/etc/oraInst.loc`、`/etc/oratab` 或 `oraenv` 判斷是否可以續跑。
+- 使用 `INSTALL_REQUIRED=N` 在下一次執行繼續後續安裝階段。
+- 因 `ORAINST_ROOT_MARKER` 或 `ROOT_SH_MARKER` 不存在而在下一次執行補跑 root scripts。
+- 使用 `/etc/oraInst.loc`、`/etc/oratab` 或 `oraenv` 判斷是否可以跨次續跑。
 - 自動刪除 Oracle Home、Inventory 或 Marker。
 - 自動重裝、修復或接管既有 Oracle Software。
 
@@ -251,7 +302,18 @@ ROOT_SH_MARKER="$ORACLE_HOME/.root_sh_complete"
 
 ### 6. SID / Listener / Database 衝突規則
 
-以下檢查只有在 Oracle Software 尚未安裝時才執行。Software 已安裝時，必須在進入 SID／Listener 檢查之前停止。
+這一節要區分兩個時間點：
+
+```text
+A. 本次 Main Script 啟動後、runInstaller 前
+B. 本次 Main Script 已成功安裝 Software 後、真正建立 Listener / Database 前
+```
+
+A 階段只有在 Software hard gate 確認 **本次執行開始前 Software 尚未安裝** 時才允許執行。
+
+B 階段屬於同一次 invocation 的第二層 creation-blocking check。即使 Software 已由本次 Main Script 安裝完成，仍必須再次檢查 SID、Listener Name 與 Listener Port，避免從 PreCheck 到實際建立資源之間狀態發生改變。
+
+如果是 **下一次執行**，Software hard gate 發現 Software 已存在時，必須在進入 A 或 B 階段之前停止。
 
 #### ORACLE_SID 不得重複使用
 
@@ -283,14 +345,26 @@ Listener Name 固定由 SID 產生：
 LISTENER_NAME="LSNR_$ORACLE_SID"
 ```
 
-如果 `listener.ora`、`lsnrctl status`、Listener 程序或 Listener Marker 已有相同名稱，立即停止：
+如果 `listener.ora`、`lsnrctl status`、Listener 程序或 Listener Marker 已有 **相同 Listener Name**，立即停止：
 
 ```text
 ERROR: Listener already exists: LSNR_ORCL
 Use a different ORACLE_SID and rerun the installer.
 ```
 
-不得 reuse、start、merge、修改或接管既有 Listener。
+不得 reuse、start、repair 或接管本次 Target Listener。
+
+既有 unrelated Listener 可以保留，但必須同時滿足：
+
+```text
+Listener Name 與本次 LISTENER_NAME 不同
+Listener Port 與本次 LISTENER_PORT 不同
+既有 Listener 定義保持原內容
+```
+
+新增本次 dedicated Listener 時可以保留 `listener.ora` 中既有 unrelated Listener entries，再加入新的 Target Listener entry。這不視為接管既有 Listener。
+
+不得為了本次安裝修改、重新命名、停止或重建 unrelated Listener。
 
 #### Listener Port 必須未被使用
 
@@ -311,14 +385,31 @@ PreCheck 分為兩個階段。
 第一階段是 Oracle Software hard gate：
 
 ```text
-Oracle Software 已安裝
+本次執行開始前 Oracle Software 已安裝
 或 Software、Oracle Home、Inventory、Marker 處於部分完成、不一致或無法安全判斷的狀態
 → 立即輸出 PRECHECK RESULT: FAIL
 → exit 1
 → 不執行其他 OS、SID、Listener、Database 或 Port 檢查
 ```
 
-第二階段是 read-only prerequisite 與 target 檢查。Software hard gate 通過後，可以完成其餘檢查並累計 `PASS_COUNT`、`WARN_COUNT` 與 `FAIL_COUNT`，不需要因單一 target failure 立即退出。Target PreCheck 必須涵蓋：
+Software hard gate 至少要先判斷：
+
+```text
+- oracle_install.conf 的必要 Inventory 設定是否存在
+- /etc/oraInst.loc 若存在，是否為 regular file
+- /etc/oraInst.loc 的 inventory_loc 是否等於 ORA_INVENTORY
+- /etc/oraInst.loc 的 inst_group 是否等於 ORACLE_GROUP
+- oracle_install.conf 指定的 Inventory 是否已登錄目標 ORACLE_HOME
+- Installer completion Marker 是否存在
+- root-script Marker 是否呈現 partial / inconsistent state
+- ORACLE_HOME 是否為正常目錄且符合尚未安裝 Software 的新安裝狀態
+```
+
+`oracle_install.conf` 是 source of truth；不得先採用 `/etc/oraInst.loc` 指向的其他 Inventory，再以該 Inventory 決定是否繼續。
+
+第二階段是 read-only prerequisite 與 target 檢查。Software hard gate 通過後，可以完成其餘檢查並累計 `PASS_COUNT`、`WARN_COUNT` 與 `FAIL_COUNT`，不需要因單一 target failure 立即退出。
+
+Target PreCheck 必須涵蓋：
 
 ```text
 - ORACLE_SID format
@@ -330,28 +421,34 @@ Oracle Software 已安裝
 
 依賴 SID 或 Listener Port 的檢查，在對應輸入格式無效時可以標示為未執行；不得使用無效輸入執行修改操作。完成 read-only 檢查後，只要 `FAIL_COUNT` 大於零，就必須輸出 `PRECHECK RESULT: FAIL` 並 `exit 1`。只有零 FAIL 才能讓 Main 繼續。
 
-Main Script 必須在真正建立 Listener／Database 前再次確認 SID、Listener Name 與 Listener Port 未被使用。PreCheck 是第一層防護，Main 是第二層防護；但 Software 已安裝時不得進入任何第二層檢查。
+Main Script 必須在 **本次 invocation 已成功完成 Software 與 root scripts 後、真正建立 Listener／Database 前**，再次確認 SID、Listener Name 與 Listener Port 未被使用。
+
+這個第二層檢查是同一次 invocation 的 creation-blocking check，不是 Software 已安裝後重跑，也不是 cross-run resume。
 
 整體判斷：
 
 ```text
-Software 已安裝
+本次執行開始前 Software 已安裝
 → STOP
 
-Software 未安裝 + SID 已使用
+本次執行開始前 Software 未安裝 + SID 已使用
 → STOP
 
-Software 未安裝 + Listener Name 已使用
+本次執行開始前 Software 未安裝 + Listener Name 已使用
 → STOP
 
-Software 未安裝 + Listener Port 已使用
+本次執行開始前 Software 未安裝 + Listener Port 已使用
 → STOP
 
-Software 未安裝
+本次執行開始前 Software 未安裝
 + SID 未使用
 + Listener Name 未使用
 + Listener Port 未使用
-→ 才允許繼續新的完整安裝
+→ 允許進入新的完整安裝
+
+本次 invocation 的 runInstaller / root scripts 成功
+→ 再次確認 SID / Listener Name / Listener Port
+→ 無衝突才建立 Listener / Database
 ```
 
 Database／Listener Marker 是已使用識別值的證據，不是允許 reuse 的依據。

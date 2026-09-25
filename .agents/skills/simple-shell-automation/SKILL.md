@@ -27,7 +27,7 @@ description: 撰寫、修改及整合 Linux Shell/Bash 自動化腳本，採用�
 
 ## Oracle 專案參考
 
-- 修改本專案的 Oracle Linux 新機安裝、Oracle Database 19c 安裝、`runInstaller`、root scripts、Marker、`ORACLE_SID`、Listener、Database、PreCheck、PostCheck 或整體停止邏輯時，必須先完整讀取並遵守 [references/Oracle_New_Server_Install_Rerun_Rules_For_Codex.md](references/Oracle_New_Server_Install_Rerun_Rules_For_Codex.md)。此專案定位為一次性新機安裝工具；Oracle Software 檢查必須先於密碼、SID 與 Listener Port 輸入。Software 一旦判定已安裝，立即停止整支流程；只有 Software 尚未安裝時才允許檢查新的 SID、Listener Name 與 Listener Port。不得加入跨次續跑、Migration、接管、合併或自動修復。本專案的「可安全重跑」只表示再次執行時會先偵測既有 Oracle Software，並在不修改既有環境的情況下停止；不代表跨次續跑，也不允許略過已完成階段後繼續安裝。
+- 修改本專案的 Oracle Linux 新機安裝、Oracle Database 19c 安裝、`runInstaller`、root scripts、Marker、`ORACLE_SID`、Listener、Database、PreCheck、PostCheck 或整體停止邏輯時，必須先完整讀取並遵守 [references/Oracle_New_Server_Install_Rerun_Rules_For_Codex.md](references/Oracle_New_Server_Install_Rerun_Rules_For_Codex.md)。此專案定位為一次性新機安裝工具；Oracle Software hard gate 必須先於密碼、SID 與 Listener Port 輸入。如果在本次 Main Script 啟動時已存在目標 Oracle Software，立即停止整支流程；只有啟動時尚未安裝 Software 才允許進入新的完整安裝流程。本次 Main Script 自己成功安裝 Software 後，可以且必須繼續同一次 invocation 的 root scripts、Listener／Database creation-blocking checks、Database 建立與 PostCheck。不得把下一次執行當成跨次續跑，也不允許略過先前已完成階段後接續安裝。
 - 修改 Oracle 安裝腳本中的使用者 Profile 管理、`.bash_profile`、`.bashrc`、`.oracle_env`、Host Profile 或 DBA Alias 時，必須先完整讀取並遵守 [references/Oracle_Profile_Simplification_For_Codex.md](references/Oracle_Profile_Simplification_For_Codex.md)。
 - 若同一修改同時涉及安裝流程與 Profile，必須同時讀取通用的新機安裝 Reference 與 Profile Reference。
 - 一般 Shell 任務不需要載入這些 Oracle 專案參考。
@@ -38,7 +38,7 @@ description: 撰寫、修改及整合 Linux Shell/Bash 自動化腳本，採用�
 - 建目錄可使用 `mkdir -p`。修改設定時先判斷值，避免每次都使用 `>>` 重複附加。
 - 修改既有設定檔時保留無關內容；需要備份時採簡單方式保留首次備份，不在每次重跑時覆蓋原始備份。
 - 套件安裝使用符合 OS 的套件管理工具，不把「RPM 檔存在」當成「已安裝」。離線情境說明來源及依賴需求，不假設網際網路可用。
-- 服務管理區分「目前執行狀態」與「開機啟用狀態」；判斷缺少服務是否可以略過，不能把必要服务缺失當成功。
+- 服務管理區分「目前執行狀態」與「開機啟用狀態」；判斷缺少服務是否可以略過，不能把必要服務缺失當成功。
 - 需重開機才生效的設定要區分目前狀態與永久設定，不自動重開機。
 - 若工作是新增資料或備份等每次都產生新結果的任務，說明重跑的實際行為，不誤稱完全不變。
 - 不自行加入刪除資料、清空磁碟、關閉 SELinux 或防火牆等未要求的操作。
