@@ -2,7 +2,7 @@
 
 ## 目的
 
-本專案只處理 Oracle Linux 新機安裝與 Oracle Database 19c 新安裝。
+本專案只處理 Oracle Linux 8 新機安裝與 Oracle Database 19c 新安裝。
 
 不處理：
 
@@ -26,6 +26,26 @@
 
 > 本文件中的「既有 Oracle Software」或「Software 已安裝後重跑」是指 **本次 Main Script 啟動之前就已經存在** 的 Oracle Software。  
 > 本次 Main Script 自己成功完成 `runInstaller` 後，仍屬於同一次受支援的新安裝 invocation，必須繼續執行同一次流程中的 root scripts、Listener／Database creation-blocking checks、Database 建立與 PostCheck。
+
+---
+
+## 支援的作業系統
+
+本專案只支援 Oracle Linux 8.x（OEL8 / OL8），不將支援範圍限制在單一 minor release。
+
+```text
+Oracle Linux 8 → 支援
+Oracle Linux 7 → FAIL
+其他 Linux    → FAIL
+```
+
+PreCheck 與 Main Script 必須在修改系統、建立目錄、修改 Profile、安裝套件或啟動 Oracle Installer 前確認目前主機為 Oracle Linux 8。
+
+如果目前主機不是 Oracle Linux 8，必須顯示實際偵測到的 OS 與 Version，然後 `exit 1`。不得只顯示 warning 後繼續，也不得加入 Oracle Linux 7、RHEL、Rocky Linux、AlmaLinux、CentOS 或其他 distribution 的相容處理。
+
+`CV_ASSUME_DISTID` 只能在已確認主機為 Oracle Linux 8 後，用於 Oracle Database 19c 19.3 Base Installer 的已知相容需求；不得用來讓非 Oracle Linux 8 主機繞過本專案的 OS 限制。
+
+此限制只定義 Distribution 與 Major Version。Architecture、Kernel、Memory、Swap、Disk、Package 與 Oracle prerequisite 仍由各自的 PreCheck 規則判斷。
 
 ---
 
@@ -115,9 +135,57 @@ inst_group    必須等於 oracle_install.conf 的 ORACLE_GROUP
 
 不得使用 `/etc/oraInst.loc` 的值覆寫 `ORA_INVENTORY`、`ORACLE_GROUP` 或其他設定變數，也不得以其內容接管另一個 Inventory。
 
+尤其不得建立另一個 Inventory 變數，再由 `/etc/oraInst.loc` 的 `inventory_loc` 改變 Software hard gate 的檢查目標，例如：
+
+```bash
+SOFTWARE_INVENTORY="$ORA_INVENTORY"
+SOFTWARE_INVENTORY="$(sed -n 's/^inventory_loc=//p' "$ORAINST_FILE")"
+```
+
+Software hard gate 的 Inventory 檢查路徑固定為：
+
+```text
+$ORA_INVENTORY/ContentsXML/inventory.xml
+```
+
 如果 `/etc/oraInst.loc` 與 `oracle_install.conf` 不一致、內容缺失、無法安全讀取，必須在 Software hard gate 階段立即停止。
 
 Software hard gate 判斷 Oracle Inventory 時，也必須以 `oracle_install.conf` 的 `ORA_INVENTORY` 為目標 Inventory；`/etc/oraInst.loc` 只負責驗證一致性，不是替代設定來源。
+
+#### Oracle Inventory 的新機狀態
+
+如果 `/etc/oraInst.loc` 不存在：
+
+```text
+ORA_INVENTORY 不存在
+→ 支援
+→ Main 可以建立新的 Inventory
+
+ORA_INVENTORY 已存在且為空目錄
+→ 支援
+→ 視為預先建立的新安裝空目錄
+
+ORA_INVENTORY 已存在且非空
+→ FAIL
+→ 視為 unknown existing Inventory
+→ DBA review
+```
+
+不得因既有非空 Inventory 的 owner、group 或權限看起來合理，就自動接管該 Inventory。
+
+如果 `/etc/oraInst.loc` 已存在：
+
+```text
+inventory_loc == ORA_INVENTORY
+且
+inst_group == ORACLE_GROUP
+→ 才能繼續檢查該 Inventory 是否符合新安裝條件
+
+inventory_loc != ORA_INVENTORY
+或
+inst_group != ORACLE_GROUP
+→ FAIL
+```
 
 ---
 
@@ -158,6 +226,38 @@ Software hard gate 判斷 Oracle Inventory 時，也必須以 `oracle_install.co
 固定環境參數由 `oracle_install.conf` 提供；`ORACLE_SID` 與 `LISTENER_PORT` 使用 DBA 本次執行時輸入的值。
 
 PreCheck 必須先判斷 **本次執行開始前** 目標 Oracle Software 是否已安裝。這項檢查必須位於 SID、Listener Port、作業系統密碼及 Database 密碼輸入之前。
+
+Software hard gate 的判斷順序固定為：
+
+```text
+1. 載入 oracle_install.conf，確認必要的 ORACLE_HOME、ORA_INVENTORY、
+   ORAINST_FILE 與 ORACLE_GROUP 設定存在。
+
+2. /etc/oraInst.loc 若存在，確認它是 regular file。
+
+3. /etc/oraInst.loc 若存在，確認：
+   inventory_loc == ORA_INVENTORY
+   inst_group    == ORACLE_GROUP
+
+4. /etc/oraInst.loc 若不存在：
+   - ORA_INVENTORY 不存在       → 可以繼續
+   - ORA_INVENTORY 為空目錄     → 可以繼續
+   - ORA_INVENTORY 為非空目錄   → FAIL，DBA review
+
+5. Oracle Software Inventory 判斷永遠只使用：
+   $ORA_INVENTORY/ContentsXML/inventory.xml
+
+6. 檢查 Installer completion Marker。
+
+7. 檢查 root-script Marker 是否呈現 partial / inconsistent state。
+
+8. 檢查 ORACLE_HOME 是否為正常目錄且符合尚未安裝 Software 的新安裝狀態。
+
+9. Software hard gate 通過後，才允許進入其餘 read-only prerequisite、
+   SID、Listener 與 Port 檢查。
+```
+
+不得先採用 `/etc/oraInst.loc` 指向的其他 Inventory，再用該路徑判斷 Oracle Software 是否存在。
 
 只要確認本次執行開始前目標 Oracle Software 已安裝，就立即 `ERROR + exit 1`，不得把 Software 階段設為 SKIP 後繼續執行。
 
@@ -399,13 +499,29 @@ Software hard gate 至少要先判斷：
 - /etc/oraInst.loc 若存在，是否為 regular file
 - /etc/oraInst.loc 的 inventory_loc 是否等於 ORA_INVENTORY
 - /etc/oraInst.loc 的 inst_group 是否等於 ORACLE_GROUP
-- oracle_install.conf 指定的 Inventory 是否已登錄目標 ORACLE_HOME
+- /etc/oraInst.loc 不存在時，ORA_INVENTORY 若已存在是否仍為空目錄
+- 只使用 $ORA_INVENTORY/ContentsXML/inventory.xml 判斷目標 ORACLE_HOME
 - Installer completion Marker 是否存在
 - root-script Marker 是否呈現 partial / inconsistent state
 - ORACLE_HOME 是否為正常目錄且符合尚未安裝 Software 的新安裝狀態
 ```
 
 `oracle_install.conf` 是 source of truth；不得先採用 `/etc/oraInst.loc` 指向的其他 Inventory，再以該 Inventory 決定是否繼續。
+
+不得使用下列模式改變 Software hard gate 的 Inventory 目標：
+
+```bash
+SOFTWARE_INVENTORY="$(sed -n 's/^inventory_loc=//p' "$ORAINST_FILE")"
+SOFTWARE_INVENTORY_FILE="$SOFTWARE_INVENTORY/ContentsXML/inventory.xml"
+```
+
+應固定以：
+
+```text
+$ORA_INVENTORY/ContentsXML/inventory.xml
+```
+
+判斷 Oracle Software 安裝狀態。
 
 第二階段是 read-only prerequisite 與 target 檢查。Software hard gate 通過後，可以完成其餘檢查並累計 `PASS_COUNT`、`WARN_COUNT` 與 `FAIL_COUNT`，不需要因單一 target failure 立即退出。
 
@@ -470,11 +586,27 @@ Database／Listener Marker 是已使用識別值的證據，不是允許 reuse �
 → ERROR
 ```
 
+其中 Oracle Inventory 有更嚴格的規則：
+
+```text
+oraInst.loc 不存在 + ORA_INVENTORY 不存在
+→ 可以建立
+
+oraInst.loc 不存在 + ORA_INVENTORY 為空目錄
+→ 可以使用
+
+oraInst.loc 不存在 + ORA_INVENTORY 非空
+→ ERROR
+→ unknown Inventory
+→ DBA review
+```
+
 不要：
 
 - 自動接管未知目錄
 - 自動改既有 Oracle Home
 - 自動猜舊權限
+- 因權限看起來合理就接管 unknown non-empty Inventory
 
 ---
 

@@ -4,7 +4,7 @@
 set +x +v
 unset ORACLE_PASSWORD DB_PASSWORD PASSWORD_CONFIRM DB_PASSWORD_RSP
 
-# Oracle Linux 7 / 8 preparation and Oracle Database 19c software installation
+# Oracle Linux 8 preparation and Oracle Database 19c software installation
 # Run this script as root.
 # The Oracle 19c ZIP can be copied by root before ORACLE_OWNER exists.
 # OS preparation and root scripts run as root; extraction and installation run as ORACLE_OWNER.
@@ -186,7 +186,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 echo "========================================"
-echo " Oracle Linux 7 / 8 and Oracle 19c"
+echo " Oracle Linux 8 and Oracle 19c"
 echo "========================================"
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -244,6 +244,11 @@ echo ""
 echo "=== 1. Set Oracle Installer Compatibility ==="
 
 . /etc/os-release
+if [ "$ID" != "ol" ] || [ "${VERSION_ID%%.*}" != "8" ]; then
+    echo "ERROR: Supported operating system is Oracle Linux 8: ${ID:-unknown} ${VERSION_ID:-unknown}"
+    exit 1
+fi
+
 INSTALLER_DISTID=""
 # The 19.3 base installer uses the OL7 compatibility identifier on OL8.
 # This changes Installer platform detection only; it does not change the OS.

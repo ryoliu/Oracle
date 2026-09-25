@@ -14,6 +14,34 @@
 - Profile 載入關係必須保持單向
 - 不讓 `.oracle_env` 再回頭載入 `.bash_profile` 或 `.bashrc`
 
+## 規格適用範圍與優先順序
+
+本文件只負責 Oracle 使用者 Profile 的檔案分工、載入順序、備份、覆寫與語法驗證。
+
+Oracle Software、Oracle Inventory、Software hard gate、Marker、SID、Listener、Database 與跨次執行停止規則，統一以：
+
+```text
+Oracle_New_Server_Install_Rerun_Rules_For_Codex.md
+```
+
+為準。
+
+Profile 不得作為 Software hard gate 的安裝參數來源，不得從既有 Profile 反推或覆寫：
+
+```text
+ORACLE_HOME
+ORA_INVENTORY
+ORACLE_GROUP
+ORACLE_SID
+LISTENER_PORT
+DATA_DIR
+FRA_DIR
+```
+
+固定環境參數仍由 `oracle_install.conf` 提供；`ORACLE_SID` 與 `LISTENER_PORT` 仍由本次受支援的新安裝流程取得。
+
+Host Profile 可以在通過 Oracle Software、SID、Listener 與 Database 新安裝衝突檢查後，由本次流程寫入固定內容；這不代表 Profile 可以用來接管或判斷既有 Oracle 環境。
+
 ## 目標載入順序
 
 ```text
@@ -218,7 +246,9 @@ symbolic link / 非 regular file
 
 8. Host Profile 可以直接覆寫不代表允許接管既有 Oracle Database。
 
-Oracle Software、SID、Listener Name、Listener Port、Database artifact 等新安裝檢查仍必須遵守 `Oracle_New_Server_Install_Rerun_Rules_For_Codex.md`。
+Oracle Software、Oracle Inventory、Software hard gate、SID、Listener Name、Listener Port、Database artifact 等新安裝檢查仍必須遵守 `Oracle_New_Server_Install_Rerun_Rules_For_Codex.md`。
+
+在該 Reference 判定必須停止的情況下，不得因 Profile 檔案可覆寫或可建立而繼續 Profile 管理。
 
 ## 修改與驗證要求
 
@@ -229,6 +259,7 @@ Oracle Software、SID、Listener Name、Listener Port、Database artifact 等新
 - Host Profile 不建立備份；既有 regular file 可以直接覆寫固定內容。
 - 所有 Profile 路徑仍必須拒絕 symbolic link 或非 regular file。
 - Host Profile 不做 parsing、merge、migration 或 adoption。
+- 不得使用任何既有 Profile 內容取代 `oracle_install.conf` 的固定安裝參數，或繞過 Software hard gate。
 - 不要為縮短程式碼而移除必要的檔案型態檢查、`bash -n` 或錯誤處理。
 - 不要使用進階 Shell 技巧。
 - 確認 login shell 能取得 `ORACLE_HOME`。

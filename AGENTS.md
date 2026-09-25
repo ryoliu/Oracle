@@ -16,6 +16,18 @@
 - 只修改與目前需求相關的程式碼。
 - 不要順便重構與目前需求無關的區段。
 
+## 支援的作業系統
+
+此專案只支援 **Oracle Linux 8.x（OEL8 / OL8）**。
+
+- Oracle Linux 8 的所有 minor release 都屬於此專案範圍；除非需求另外指定，不要把支援範圍寫死為單一版本（例如 8.8）。
+- Oracle Linux 7、Oracle Linux 9、RHEL、Rocky Linux、AlmaLinux、CentOS 及其他 Linux distribution 均不屬於支援範圍。
+- PreCheck 與 Main Script 必須在修改系統、建立目錄、修改 Profile、安裝套件或啟動 Oracle Installer 前先確認 OS。
+- 若目前主機不是 Oracle Linux 8，必須清楚顯示實際偵測到的 OS / Version，然後 `exit 1`；不得只顯示 warning 後繼續。
+- 不要使用 `CV_ASSUME_DISTID` 或其他方式把非 Oracle Linux 8 的主機偽裝成受支援的 OS，以繞過專案的 OS 限制。
+- OS 檢查應保持簡單，優先使用 Oracle Linux 自帶的 release 資訊，例如 `/etc/oracle-release` 或 `/etc/os-release`；不要為了支援其他 distribution 加入額外相容邏輯。
+- 此 OS 限制只定義 Distribution / Major Version 範圍；Architecture、Kernel、Memory、Swap、Disk、Package 與 Oracle prerequisite 仍由各自的 PreCheck 規則判斷。
+
 ## Oracle 安裝範圍
 
 此專案只用於全新的 Oracle 安裝。
@@ -36,4 +48,4 @@
 
 當工作內容符合 Oracle Reference 文件的適用範圍時，必須完整讀取並遵守對應的 Oracle Reference 文件。
 
-Oracle 專案的特定 Reference 規則優先於一般 Shell 可重跑規則。
+Oracle 專案的特定 Reference 規則優先於一般 Shell 可重跑規則，但不得放寬本檔定義的 Oracle Linux 8 支援範圍。

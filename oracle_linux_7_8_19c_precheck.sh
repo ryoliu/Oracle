@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Read-only pre-install checks for Oracle Linux 7 / 8 and Oracle Database 19c.
+# Read-only pre-install checks for Oracle Linux 8 and Oracle Database 19c.
 #
 # Result policy for Main or a DBA:
 #   PASS = requirement is currently satisfied.
@@ -190,7 +190,7 @@ fi
 if [ "$TARGET_ONLY" -eq 0 ]; then
 
 echo "========================================"
-echo " Oracle Linux 7 / 8 and Oracle 19c Precheck"
+echo " Oracle Linux 8 and Oracle 19c Precheck"
 echo "========================================"
 
 echo ""
@@ -210,12 +210,12 @@ if [ -r /etc/os-release ]; then
     . /etc/os-release
     OS_MAJOR="${VERSION_ID%%.*}"
     case "$ID:$OS_MAJOR" in
-        ol:7|ol:8)
+        ol:8)
             echo "PASS: Supported operating system detected: $ID $VERSION_ID"
             PASS_COUNT=$((PASS_COUNT + 1))
             ;;
         *)
-            echo "FAIL: Supported operating systems are Oracle Linux 7 and 8: ${ID:-unknown} ${VERSION_ID:-unknown}"
+            echo "FAIL: Supported operating system is Oracle Linux 8: ${ID:-unknown} ${VERSION_ID:-unknown}"
             FAIL_COUNT=$((FAIL_COUNT + 1))
             ;;
     esac
@@ -251,7 +251,7 @@ for REQUIRED_COMMAND in awk df dirname find getenforce getent grep hostname id r
 done
 
 # Compare the running kernel with the documented minimum for its recognized
-# OL7/OL8 UEK or RHCK family. Unknown newer families remain a DBA warning.
+# Oracle Linux 8 UEK or RHCK family. Unknown newer families remain a DBA warning.
 KERNEL_RELEASE=""
 KERNEL_FAMILY=""
 MINIMUM_KERNEL=""
@@ -264,29 +264,6 @@ else
     echo "Running kernel: $KERNEL_RELEASE"
 
     case "$OS_MAJOR" in
-        7)
-            case "$KERNEL_RELEASE" in
-                4.1.*el7uek*)
-                    KERNEL_FAMILY="Oracle Linux 7 UEK4"
-                    MINIMUM_KERNEL="4.1.12-124.19.2.el7uek.x86_64"
-                    ;;
-                4.14.*el7uek*)
-                    KERNEL_FAMILY="Oracle Linux 7 UEK5"
-                    MINIMUM_KERNEL="4.14.35-1818.1.6.el7uek.x86_64"
-                    ;;
-                5.4.*el7uek*)
-                    KERNEL_FAMILY="Oracle Linux 7 UEK6"
-                    MINIMUM_KERNEL="5.4.17-2011.4.4.el7uek.x86_64"
-                    KERNEL_RU_NOTE="Oracle Linux 7 UEK6 requires Oracle Database 19c RU 19.9 or later."
-                    ;;
-                *uek*)
-                    ;;
-                3.10.*el7*)
-                    KERNEL_FAMILY="Oracle Linux 7 RHCK"
-                    MINIMUM_KERNEL="3.10.0-862.11.6.el7.x86_64"
-                    ;;
-            esac
-            ;;
         8)
             case "$KERNEL_RELEASE" in
                 5.4.*el8uek*)
