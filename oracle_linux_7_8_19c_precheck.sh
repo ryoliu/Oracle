@@ -171,8 +171,7 @@ else
        [ -z "${SELINUX_CONFIG:-}" ] || [ -z "${TIMEZONE:-}" ] ||
        [ -z "${SOFTWARE_SOURCE_DIR:-}" ] || [ -z "${ZIP_FILE:-}" ] ||
        [ -z "${ORACLE_BASE:-}" ] || [ -z "${ORACLE_OWNER:-}" ] ||
-       [ -z "${ORACLE_GROUP:-}" ] || [ -z "${DATA_DIR:-}" ] ||
-       [ -z "${FRA_DIR:-}" ]; then
+       [ -z "${ORACLE_GROUP:-}" ] || [ -z "${DATA_DIR:-}" ]; then
         echo "FAIL: Required settings are missing from: $CONFIG_FILE"
         echo "PRECHECK RESULT: FAIL"
         exit 1

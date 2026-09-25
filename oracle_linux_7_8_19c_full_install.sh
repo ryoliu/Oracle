@@ -216,11 +216,18 @@ if [ -z "${PACKAGE_NAME:-}" ] || [ -z "${LIMITS_FILE:-}" ] ||
    [ -z "${SOFTWARE_SOURCE_DIR:-}" ] || [ -z "${ZIP_FILE:-}" ] ||
    [ -z "${ORACLE_BASE:-}" ] || [ -z "${ORACLE_OWNER:-}" ] ||
    [ -z "${ORACLE_GROUP:-}" ] || [ -z "${LOCAL_BIN_DIR:-}" ] ||
-   [ -z "${DATA_DIR:-}" ] || [ -z "${FRA_DIR:-}" ] ||
-   [ -z "${TOTAL_MEMORY_MB:-}" ] || [ -z "${FRA_SIZE_MB:-}" ] ||
-   [ -z "${CHARACTER_SET:-}" ] || [ -z "${NATIONAL_CHARACTER_SET:-}" ]; then
-    echo "ERROR: Required settings are missing from: $CONFIG_FILE"
+   [ -z "${DATA_DIR:-}" ]; then
+    echo "ERROR: Base installation settings are missing from: $CONFIG_FILE"
     exit 1
+fi
+
+if [ "$CREATE_DB" -eq 1 ]; then
+    if [ -z "${FRA_DIR:-}" ] || [ -z "${TOTAL_MEMORY_MB:-}" ] ||
+       [ -z "${FRA_SIZE_MB:-}" ] || [ -z "${CHARACTER_SET:-}" ] ||
+       [ -z "${NATIONAL_CHARACTER_SET:-}" ]; then
+        echo "ERROR: Database creation settings are missing from: $CONFIG_FILE"
+        exit 1
+    fi
 fi
 
 DB_HOST="$(hostname -f 2>/dev/null)"
