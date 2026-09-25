@@ -55,6 +55,25 @@ CURRENT_STAGE="input validation"
 PASSWORD_RESET_REQUESTED=0
 ORACLE_PASSWORD_STATUS="preserved"
 
+require_command() {
+    local COMMAND_NAME="$1"
+
+    if ! command -v "$COMMAND_NAME" >/dev/null 2>&1; then
+        echo "ERROR: Required command was not found: $COMMAND_NAME"
+        exit 1
+    fi
+}
+
+check_marker_file() {
+    local MARKER_FILE="$1"
+
+    if [ -L "$MARKER_FILE" ] ||
+       { [ -e "$MARKER_FILE" ] && [ ! -f "$MARKER_FILE" ]; }; then
+        echo "ERROR: Completion marker must be a regular file: $MARKER_FILE"
+        exit 1
+    fi
+}
+
 for SCRIPT_OPTION in "$@"; do
     case "$SCRIPT_OPTION" in
         --create-db)
@@ -107,6 +126,12 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
+require_command runuser
+check_marker_file "$EXTRACT_MARKER"
+check_marker_file "$INSTALL_MARKER"
+check_marker_file "$ORAINST_ROOT_MARKER"
+check_marker_file "$ROOT_SH_MARKER"
+
 if id "$ORACLE_OWNER" >/dev/null 2>&1; then
     ORACLE_USER_EXISTED_BEFORE_PREINSTALL=1
 else
@@ -114,31 +139,13 @@ else
 fi
 
 echo ""
-echo "=== 1. Check OS / Kernel / Architecture / Hostname ==="
-
-echo ""
-echo "--- OS ---"
-if [ ! -r /etc/os-release ]; then
-    echo "ERROR: Cannot read /etc/os-release."
-    exit 1
-fi
+echo "=== 1. Set Oracle Installer Compatibility ==="
 
 . /etc/os-release
 INSTALLER_DISTID=""
-case "$ID:${VERSION_ID%%.*}" in
-    ol:7)
-        echo "Oracle Linux 7 detected. No CV_ASSUME_DISTID override is required."
-        ;;
-    ol:8)
-        INSTALLER_DISTID="OL7"
-        echo "Oracle Linux 8 detected. Using CV_ASSUME_DISTID=OL7 for the 19.3 installer."
-        echo "Installation prerequisite: accept this override; no RU or certification check is included."
-        ;;
-    *)
-        echo "ERROR: This script supports Oracle Linux 7 and 8 only: $ID $VERSION_ID"
-        exit 1
-        ;;
-esac
+if [ "$ID" = "ol" ] && [ "${VERSION_ID%%.*}" = "8" ]; then
+    INSTALLER_DISTID="OL7"
+fi
 
 # Collect all user input before installing packages or changing the system.
 if [ ! -t 0 ] || [ ! -t 1 ]; then
@@ -290,11 +297,7 @@ echo "=== 2. Check yum and install 19c preinstall package ==="
 if rpm -q "$PACKAGE_NAME" >/dev/null 2>&1; then
     echo "Package is already installed: $PACKAGE_NAME"
 else
-    if ! command -v yum >/dev/null 2>&1; then
-        echo "ERROR: yum command was not found."
-        echo "SYS ACTION REQUIRED: Please check the yum installation."
-        exit 1
-    fi
+    require_command yum
 
     echo "Checking enabled yum repositories..."
     if ! yum repolist; then
@@ -534,16 +537,7 @@ echo "Locked memory hard limit:"
 su - oracle -c "ulimit -Hl"
 
 echo ""
-echo "=== 8. Check Transparent HugePages ==="
-
-if [ -f /sys/kernel/mm/transparent_hugepage/enabled ]; then
-    cat /sys/kernel/mm/transparent_hugepage/enabled
-else
-    echo "Transparent HugePages status file was not found."
-fi
-
-echo ""
-echo "=== 9. Disable SELinux ==="
+echo "=== 8. Disable SELinux ==="
 
 if [ ! -f "$SELINUX_CONFIG" ]; then
     echo "ERROR: SELinux configuration file was not found: $SELINUX_CONFIG"
@@ -589,7 +583,7 @@ else
 fi
 
 echo ""
-echo "=== 10. Disable firewalld ==="
+echo "=== 9. Disable firewalld ==="
 
 if ! CURRENT_SELINUX="$(getenforce)" ||
    { [ "$CURRENT_SELINUX" != "Permissive" ] && [ "$CURRENT_SELINUX" != "Disabled" ]; }; then
@@ -602,45 +596,45 @@ if ! SERVICE_UNITS="$(systemctl list-unit-files --no-pager)"; then
     exit 1
 fi
 
-if printf '%s\n' "$SERVICE_UNITS" | grep -q "^firewalld\.service[[:space:]]"; then
-    if ! systemctl stop firewalld || ! systemctl disable firewalld; then
-        echo "ERROR: Failed to stop or disable firewalld."
-        exit 1
+disable_service() {
+    local SERVICE_NAME="$1"
+    local SERVICE_ACTIVE
+    local SERVICE_ENABLED
+
+    if printf '%s\n' "$SERVICE_UNITS" | grep -q "^${SERVICE_NAME}\.service[[:space:]]"; then
+        echo "Stopping and disabling $SERVICE_NAME..."
+
+        if ! systemctl stop "$SERVICE_NAME" ||
+           ! systemctl disable "$SERVICE_NAME"; then
+            echo "ERROR: Failed to stop or disable $SERVICE_NAME."
+            exit 1
+        fi
+
+        SERVICE_ACTIVE="$(systemctl is-active "$SERVICE_NAME" 2>/dev/null)"
+        SERVICE_ENABLED="$(systemctl is-enabled "$SERVICE_NAME" 2>/dev/null)"
+
+        if [ "$SERVICE_ACTIVE" != "inactive" ] ||
+           { [ "$SERVICE_ENABLED" != "disabled" ] &&
+             [ "$SERVICE_ENABLED" != "masked" ]; }; then
+            echo "ERROR: $SERVICE_NAME stopped or disabled status verification failed."
+            exit 1
+        fi
+
+        echo "$SERVICE_NAME has been stopped and disabled."
+    else
+        echo "$SERVICE_NAME is not installed."
     fi
-    SERVICE_ACTIVE="$(systemctl is-active firewalld 2>/dev/null)"
-    SERVICE_ENABLED="$(systemctl is-enabled firewalld 2>/dev/null)"
-    if [ "$SERVICE_ACTIVE" != "inactive" ] ||
-       { [ "$SERVICE_ENABLED" != "disabled" ] && [ "$SERVICE_ENABLED" != "masked" ]; }; then
-        echo "ERROR: firewalld stopped or disabled status verification failed."
-        exit 1
-    fi
-    echo "firewalld has been stopped and disabled."
-else
-    echo "firewalld is not installed."
-fi
+}
+
+disable_service firewalld
 
 echo ""
-echo "=== 11. Disable iptables ==="
+echo "=== 10. Disable iptables ==="
 
-if printf '%s\n' "$SERVICE_UNITS" | grep -q "^iptables\.service[[:space:]]"; then
-    if ! systemctl stop iptables || ! systemctl disable iptables; then
-        echo "ERROR: Failed to stop or disable iptables."
-        exit 1
-    fi
-    SERVICE_ACTIVE="$(systemctl is-active iptables 2>/dev/null)"
-    SERVICE_ENABLED="$(systemctl is-enabled iptables 2>/dev/null)"
-    if [ "$SERVICE_ACTIVE" != "inactive" ] ||
-       { [ "$SERVICE_ENABLED" != "disabled" ] && [ "$SERVICE_ENABLED" != "masked" ]; }; then
-        echo "ERROR: iptables stopped or disabled status verification failed."
-        exit 1
-    fi
-    echo "iptables has been stopped and disabled."
-else
-    echo "iptables service is not installed."
-fi
+disable_service iptables
 
 echo ""
-echo "=== 12. Check timezone ==="
+echo "=== 11. Check timezone ==="
 
 get_current_timezone() {
     CURRENT_TIMEZONE=""
@@ -686,7 +680,7 @@ if ! get_current_timezone ||
     exit 1
 fi
 
-echo "=== 13. Configure Oracle User Profile ==="
+echo "=== 12. Configure Oracle User Profile ==="
 
 echo "Switching to oracle user to configure shell startup files..."
 
@@ -796,7 +790,7 @@ fi
 echo "Oracle shell startup configuration completed."
 
 echo ""
-echo "=== 14. Extract Oracle 19c Database Home ==="
+echo "=== 13. Extract Oracle 19c Database Home ==="
 
 # The marker records successful extraction only, not installation or file integrity.
 if [ "$INSTALL_REQUIRED" = "N" ]; then
@@ -812,15 +806,7 @@ else
         exit 1
     fi
 
-    if ! command -v unzip >/dev/null 2>&1; then
-        echo "ERROR: unzip was not found. Install the unzip package as root."
-        exit 1
-    fi
-
-    if ! command -v runuser >/dev/null 2>&1; then
-        echo "ERROR: runuser was not found."
-        exit 1
-    fi
+    require_command unzip
 
     if ! ZIP_OWNER="$(stat -Lc %U "$SOFTWARE_SOURCE_DIR/$ZIP_FILE")"; then
         echo "ERROR: Failed to check ZIP file owner."
@@ -894,7 +880,7 @@ fi
 echo "Installer path: $ORACLE_HOME/runInstaller"
 
 echo ""
-echo "=== 15. Install Oracle Database 19c software ==="
+echo "=== 14. Install Oracle Database 19c software ==="
 
 if [ ! -f "$ORACLE_HOME/runInstaller" ]; then
     echo "ERROR: runInstaller was not found: $ORACLE_HOME/runInstaller"
@@ -907,41 +893,6 @@ if [ "$INSTALL_REQUIRED" = "N" ]; then
 fi
 
 if [ "$INSTALL_REQUIRED" = "Y" ]; then
-    echo ""
-    echo "=== Check Memory and Swap ==="
-
-    if ! MEM_KB=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo) ||
-       ! SWAP_KB=$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo); then
-        echo "ERROR: Failed to read Memory and Swap from /proc/meminfo."
-        exit 1
-    fi
-    if ! [ "$MEM_KB" -gt 0 ] 2>/dev/null ||
-       ! [ "$SWAP_KB" -ge 0 ] 2>/dev/null; then
-        echo "ERROR: Invalid Memory or Swap value in /proc/meminfo."
-        exit 1
-    fi
-
-    echo "Memory: $((MEM_KB / 1024)) MB"
-    echo "Swap:   $((SWAP_KB / 1024)) MB"
-
-    if [ "$MEM_KB" -lt 2097152 ]; then
-        echo "ERROR: This script requires at least 2 GB of RAM."
-        exit 1
-    elif [ "$MEM_KB" -le 16777216 ]; then
-        REQUIRED_SWAP_KB=$MEM_KB
-    else
-        REQUIRED_SWAP_KB=16777216
-    fi
-
-    if [ "$SWAP_KB" -lt "$REQUIRED_SWAP_KB" ]; then
-        echo "ERROR: Swap size is insufficient for Oracle Database installation."
-        echo "Required Swap: at least $(((REQUIRED_SWAP_KB + 1023) / 1024)) MB"
-        echo "Please increase Swap and rerun this script."
-        exit 1
-    fi
-
-    echo "Swap size check passed."
-
     su - "$ORACLE_OWNER" -c "
         unset CV_ASSUME_DISTID
         if [ -n \"$INSTALLER_DISTID\" ]; then
@@ -1005,13 +956,7 @@ if [ "$INSTALL_REQUIRED" = "Y" ]; then
 fi
 
 echo ""
-echo "=== 16. Run orainstRoot.sh ==="
-
-if [ -L "$ORAINST_ROOT_MARKER" ] ||
-   { [ -e "$ORAINST_ROOT_MARKER" ] && [ ! -f "$ORAINST_ROOT_MARKER" ]; }; then
-    echo "ERROR: orainstRoot.sh completion marker must be a regular file: $ORAINST_ROOT_MARKER"
-    exit 1
-fi
+echo "=== 15. Run orainstRoot.sh ==="
 
 if [ -f "$ORAINST_ROOT_MARKER" ]; then
     echo "orainstRoot.sh already completed. Skip."
@@ -1037,13 +982,7 @@ fi
 
 
 echo ""
-echo "=== 17. Run root.sh ==="
-
-if [ -L "$ROOT_SH_MARKER" ] ||
-   { [ -e "$ROOT_SH_MARKER" ] && [ ! -f "$ROOT_SH_MARKER" ]; }; then
-    echo "ERROR: root.sh completion marker must be a regular file: $ROOT_SH_MARKER"
-    exit 1
-fi
+echo "=== 16. Run root.sh ==="
 
 if [ -f "$ROOT_SH_MARKER" ]; then
     echo "root.sh already completed. Skip."
@@ -1198,6 +1137,50 @@ export TNS_ADMIN="$ORACLE_HOME/network/admin"
 export LD_LIBRARY_PATH="$ORACLE_HOME/lib"
 export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 
+verify_listener_endpoint() {
+    local LISTENER_STATUS
+
+    if ! LISTENER_STATUS=$("$ORACLE_HOME/bin/lsnrctl" status "$LISTENER_NAME"); then
+        echo "ERROR: Listener status check failed: $LISTENER_NAME"
+        return 1
+    fi
+
+    printf '%s\n' "$LISTENER_STATUS"
+
+    if ! printf '%s\n' "$LISTENER_STATUS" |
+         tr -d '[:space:]' |
+         grep -Fiq "(HOST=$DB_HOST)(PORT=$LISTENER_PORT)"; then
+        echo "ERROR: Listener endpoint does not match DB_HOST and LISTENER_PORT."
+        return 1
+    fi
+
+    return 0
+}
+
+verify_database_open() {
+    local DATABASE_STATUS
+
+    if ! DATABASE_STATUS=$("$ORACLE_HOME/bin/sqlplus" -L -s / as sysdba <<'SQL'
+WHENEVER OSERROR EXIT FAILURE
+WHENEVER SQLERROR EXIT FAILURE
+SET HEADING OFF FEEDBACK OFF PAGES 0 VERIFY OFF ECHO OFF
+SELECT name || ':' || open_mode FROM v$database;
+EXIT SUCCESS
+SQL
+    ); then
+        echo "ERROR: Database connection or status query failed."
+        return 1
+    fi
+
+    if ! printf '%s\n' "$DATABASE_STATUS" |
+         grep -Eq "^[[:space:]]*$DB_NAME:READ WRITE[[:space:]]*$"; then
+        echo "ERROR: Database identity or open mode is inconsistent."
+        return 1
+    fi
+
+    return 0
+}
+
 echo "=== Preflight: Check target database and files ==="
 LISTENER_MARKER="$TNS_ADMIN/.LSNR_${ORACLE_SID}_complete"
 DATABASE_MARKER="$ORACLE_BASE/.DB_${ORACLE_SID}_complete"
@@ -1253,19 +1236,8 @@ SQL
         fi
     fi
 
-    if ! DATABASE_STATUS=$("$ORACLE_HOME/bin/sqlplus" -L -s / as sysdba <<'SQL'
-WHENEVER OSERROR EXIT FAILURE
-WHENEVER SQLERROR EXIT FAILURE
-SET HEADING OFF FEEDBACK OFF PAGES 0 VERIFY OFF ECHO OFF
-SELECT name || ':' || open_mode FROM v$database;
-EXIT SUCCESS
-SQL
-    ); then
-        echo "ERROR: Database marker exists, but the target database is not available."
-        exit 1
-    fi
-    if ! printf '%s\n' "$DATABASE_STATUS" | grep -Eq "^[[:space:]]*$DB_NAME:READ WRITE[[:space:]]*$"; then
-        echo "ERROR: Database marker exists, but the database identity or open mode is inconsistent."
+    if ! verify_database_open; then
+        echo "ERROR: Completed database verification failed."
         exit 1
     fi
 
@@ -1324,19 +1296,15 @@ if [ -f "$LISTENER_MARKER" ]; then
         exit 1
     fi
 
-    if ! LISTENER_STATUS=$("$ORACLE_HOME/bin/lsnrctl" status "$LISTENER_NAME"); then
+    if ! "$ORACLE_HOME/bin/lsnrctl" status "$LISTENER_NAME" >/dev/null 2>&1; then
         echo "Target Listener is stopped. Starting the completed Listener for verification."
         if ! "$ORACLE_HOME/bin/lsnrctl" start "$LISTENER_NAME"; then
             echo "ERROR: Listener marker exists, but the target Listener could not be started."
             exit 1
         fi
-        if ! LISTENER_STATUS=$("$ORACLE_HOME/bin/lsnrctl" status "$LISTENER_NAME"); then
-            echo "ERROR: The target Listener did not remain available after startup."
-            exit 1
-        fi
     fi
-    printf '%s\n' "$LISTENER_STATUS"
-    if ! printf '%s\n' "$LISTENER_STATUS" | tr -d '[:space:]' | grep -Fiq "(HOST=$DB_HOST)(PORT=$LISTENER_PORT)"; then
+
+    if ! verify_listener_endpoint; then
         echo "ERROR: Listener marker and active Listener endpoint are inconsistent."
         exit 1
     fi
@@ -1376,10 +1344,6 @@ if [ "$LISTENER_REQUIRED" = "Y" ]; then
     fi
 fi
 
-echo "=== Review memory before creating resources ==="
-AVAILABLE_MB=$(awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo)
-echo "Available RAM: ${AVAILABLE_MB:-unknown} MB; database memory: $TOTAL_MEMORY_MB MB."
-echo "Memory is informational; allow capacity for the OS and other databases."
 if ! mkdir -p "$DATA_DIR" "$FRA_DIR"; then
     echo "ERROR: Cannot create storage roots."
     exit 1
@@ -1425,13 +1389,9 @@ if [ "$LISTENER_REQUIRED" = "Y" ]; then
         echo "ERROR: Failed to start the target Listener. Review $LISTENER_FILE before retrying."
         exit 1
     fi
-    if ! LISTENER_STATUS=$("$ORACLE_HOME/bin/lsnrctl" status "$LISTENER_NAME"); then
-        echo "ERROR: The target Listener did not remain available after startup."
-        exit 1
-    fi
-    printf '%s\n' "$LISTENER_STATUS"
-    if ! printf '%s\n' "$LISTENER_STATUS" | tr -d '[:space:]' | grep -Fiq "(HOST=$DB_HOST)(PORT=$LISTENER_PORT)"; then
-        echo "ERROR: Listener endpoint does not match DB_HOST and LISTENER_PORT. Review before DBCA."
+
+    if ! verify_listener_endpoint; then
+        echo "ERROR: Listener endpoint verification failed after creation."
         exit 1
     fi
     if ! touch "$LISTENER_MARKER"; then
@@ -1472,19 +1432,8 @@ if [ "$DATABASE_REQUIRED" = "Y" ]; then
         echo "ERROR: DBCA succeeded, but the target spfile is missing."
         exit 1
     fi
-    if ! DATABASE_STATUS=$("$ORACLE_HOME/bin/sqlplus" -L -s / as sysdba <<'SQL'
-WHENEVER OSERROR EXIT FAILURE
-WHENEVER SQLERROR EXIT FAILURE
-SET HEADING OFF FEEDBACK OFF PAGES 0 VERIFY OFF ECHO OFF
-SELECT name || ':' || open_mode FROM v$database;
-EXIT SUCCESS
-SQL
-    ); then
-        echo "ERROR: DBCA succeeded, but the target database connection failed."
-        exit 1
-    fi
-    if ! printf '%s\n' "$DATABASE_STATUS" | grep -Eq "^[[:space:]]*$DB_NAME:READ WRITE[[:space:]]*$"; then
-        echo "ERROR: DBCA succeeded, but the database identity or open mode is inconsistent."
+    if ! verify_database_open; then
+        echo "ERROR: DBCA completed, but database verification failed."
         exit 1
     fi
     if ! touch "$DATABASE_MARKER"; then
@@ -1509,31 +1458,8 @@ then
     exit 1
 fi
 
-echo "=== 6. Verify Listener and client connectivity ==="
-if ! "$ORACLE_HOME/bin/lsnrctl" status "$LISTENER_NAME" ||
-   ! "$ORACLE_HOME/bin/lsnrctl" services "$LISTENER_NAME"; then
-    echo "ERROR: Listener verification failed."
-    exit 1
-fi
-echo "Review the service listing above: the target instance should have READY status."
-echo "Verify the SYSTEM connection using the password collected at startup."
-if ! "$ORACLE_HOME/bin/sqlplus" -L -s /nolog <<SQL
-WHENEVER OSERROR EXIT FAILURE
-WHENEVER SQLERROR EXIT FAILURE
-SET ECHO OFF VERIFY OFF DEFINE OFF
-@"$DB_SECRET_DIR/connect.sql"
-SELECT SYS_CONTEXT('USERENV','INSTANCE_NAME') AS instance_name,
-       SYS_CONTEXT('USERENV','SERVICE_NAME') AS service_name,
-       SYS_CONTEXT('USERENV','CON_NAME') AS container_name FROM dual;
-EXIT SUCCESS
-SQL
-then
-    echo "ERROR: SYSTEM connection or verification query failed."
-    exit 1
-fi
-echo "Database creation and verification completed successfully."
 echo "Configure $TNS_ADMIN/tnsnames.ora manually if a local TNS alias is required."
-
+echo "=== 6. Set host profile ==="
 if ! cat > "$HOST_PROFILE" <<EOF; then
 export ORACLE_SID="$ORACLE_SID"
 DB_NAME="$ORACLE_SID"
@@ -1549,7 +1475,7 @@ if ! bash -n "$HOST_PROFILE"; then
 fi
 
 echo "Updated host profile: $HOST_PROFILE"
-echo "All steps completed. Profile settings apply to future logins."
+echo "Database and profile configuration completed."
 ORACLE_DATABASE_SCRIPT
     DB_WORKER_PID=$!
     wait "$DB_WORKER_PID"
@@ -1559,13 +1485,27 @@ ORACLE_DATABASE_SCRIPT
         echo "ERROR: Database stage failed with status $DB_RESULT. Review the stage output before continuing manually."
         exit "$DB_RESULT"
     fi
+    CURRENT_STAGE="post-install health check"
+    POSTCHECK_SCRIPT="$SCRIPT_DIR/oracle_linux_7_8_19c_postcheck.sh"
+    if [ -L "$POSTCHECK_SCRIPT" ] || [ ! -f "$POSTCHECK_SCRIPT" ]; then
+        echo "ERROR: PostCheck must be a regular file: $POSTCHECK_SCRIPT"
+        exit 1
+    fi
+    if ! runuser -u "$ORACLE_OWNER" -- env \
+        ORACLE_BASE="$ORACLE_BASE" ORACLE_HOME="$ORACLE_HOME" ORACLE_SID="$ORACLE_SID" \
+        TNS_ADMIN="$ORACLE_HOME/network/admin" LD_LIBRARY_PATH="$ORACLE_HOME/lib" \
+        bash "$POSTCHECK_SCRIPT" "$ORACLE_SID" "$LISTENER_PORT" \
+        "$DB_HOST" "$DB_SERVICE" "$DB_SECRET_DIR"; then
+        echo "ERROR: Oracle Database PostCheck failed."
+        exit 1
+    fi
     if ! rm -f -- "$DB_SECRET_DIR/dbca.rsp" "$DB_SECRET_DIR/connect.sql" ||
        ! rmdir -- "$DB_SECRET_DIR"; then
         echo "ERROR: Could not remove database credential files."
         exit 1
     fi
     DB_SECRET_DIR=""
-    echo "Database and profile configuration completed. Review Listener READY status in the output."
+    echo "Database, profile, and PostCheck completed successfully."
 fi
 CURRENT_STAGE="completed"
 
@@ -1581,6 +1521,7 @@ echo "Oracle 19c Home: $ORACLE_HOME"
 if [ "$CREATE_DB" -eq 1 ]; then
     echo "Database: $ORACLE_SID; Listener: LSNR_$ORACLE_SID:$LISTENER_PORT"
     echo "Database, Listener, and SQL*Plus Easy Connect verification completed."
+    echo "PostCheck completed successfully."
     echo "tnsnames.ora requires manual configuration."
 else
     echo "Software-only mode completed. No database was created."
