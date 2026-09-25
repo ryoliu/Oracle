@@ -31,7 +31,6 @@ if [ -z "${ORACLE_HOME:-}" ] || [ -z "${ORA_INVENTORY:-}" ] ||
     exit 1
 fi
 
-EXTRACT_MARKER="$ORACLE_HOME/.oracle_19c_extraction_complete"
 INSTALL_MARKER="$ORACLE_HOME/.oracle_19c_installer_complete"
 ORAINST_ROOT_MARKER="$ORA_INVENTORY/.orainstRoot_complete"
 ROOT_SH_MARKER="$ORACLE_HOME/.root_sh_complete"
@@ -133,7 +132,7 @@ if [ -e "$INSTALL_MARKER" ] || [ -L "$INSTALL_MARKER" ] ||
 fi
 
 # Partial software state also stops before unrelated prerequisite checks.
-for PARTIAL_MARKER in "$EXTRACT_MARKER" "$ORAINST_ROOT_MARKER" "$ROOT_SH_MARKER"; do
+for PARTIAL_MARKER in "$ORAINST_ROOT_MARKER" "$ROOT_SH_MARKER"; do
     if [ -e "$PARTIAL_MARKER" ] || [ -L "$PARTIAL_MARKER" ]; then
         echo "FAIL: Existing completion marker requires DBA review: $PARTIAL_MARKER"
         echo "PRECHECK RESULT: FAIL"
@@ -279,7 +278,7 @@ else
                 5.4.*el7uek*)
                     KERNEL_FAMILY="Oracle Linux 7 UEK6"
                     MINIMUM_KERNEL="5.4.17-2011.4.4.el7uek.x86_64"
-                    KERNEL_RU_NOTE="Oracle Linux 7 UEK6 requires Oracle Database 19c RU 19.9 or later; the current Oracle Home RU is not checked."
+                    KERNEL_RU_NOTE="Oracle Linux 7 UEK6 requires Oracle Database 19c RU 19.9 or later."
                     ;;
                 *uek*)
                     ;;
@@ -298,7 +297,7 @@ else
                 5.15.*el8uek*)
                     KERNEL_FAMILY="Oracle Linux 8 UEK7"
                     MINIMUM_KERNEL="5.15.0-202.135.2.el8uek.x86_64"
-                    KERNEL_RU_NOTE="Oracle Linux 8 UEK7 requires Oracle Database 19c RU 19.21 or later; the current Oracle Home RU is not checked."
+                    KERNEL_RU_NOTE="Oracle Linux 8 UEK7 requires Oracle Database 19c RU 19.21 or later."
                     ;;
                 *uek*)
                     ;;
@@ -318,17 +317,19 @@ else
         echo "FAIL: Required command is missing for kernel comparison: sort"
         FAIL_COUNT=$((FAIL_COUNT + 1))
     elif printf '%s\n%s\n' "$MINIMUM_KERNEL" "$KERNEL_RELEASE" | LC_ALL=C sort -V -C; then
-        echo "PASS: Running kernel meets the documented minimum for $KERNEL_FAMILY: $KERNEL_RELEASE"
-        echo "INFO: This checks the kernel minimum only; Oracle RU and full certification are not verified."
-        PASS_COUNT=$((PASS_COUNT + 1))
+        if [ -n "$KERNEL_RU_NOTE" ]; then
+            echo "FAIL: $KERNEL_RU_NOTE"
+            echo "FAIL: This installer uses Oracle Database 19c 19.3 Base Media and does not apply an RU."
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+        else
+            echo "PASS: Running kernel meets the documented minimum for $KERNEL_FAMILY: $KERNEL_RELEASE"
+            echo "INFO: This checks the kernel minimum only; full certification is not verified."
+            PASS_COUNT=$((PASS_COUNT + 1))
+        fi
     else
         echo "FAIL: Running kernel is below the documented minimum for $KERNEL_FAMILY: $KERNEL_RELEASE"
         echo "FAIL: Minimum kernel: $MINIMUM_KERNEL"
         FAIL_COUNT=$((FAIL_COUNT + 1))
-    fi
-
-    if [ -n "$KERNEL_RU_NOTE" ]; then
-        echo "INFO: $KERNEL_RU_NOTE"
     fi
 fi
 # End running kernel check.
