@@ -127,12 +127,59 @@ elif [ -f "$ORAINST_FILE" ]; then
         exit 1
     fi
     INVENTORY_DECLARED=1
+else
+    if [ -L "$ORA_INVENTORY" ] ||
+       { [ -e "$ORA_INVENTORY" ] && [ ! -d "$ORA_INVENTORY" ]; }; then
+        echo "FAIL: Undeclared Oracle Inventory path must be a normal directory: $ORA_INVENTORY"
+        echo "PRECHECK RESULT: FAIL"
+        exit 1
+    elif [ -d "$ORA_INVENTORY" ]; then
+        if ! command -v find >/dev/null 2>&1; then
+            echo "FAIL: Required command is missing: find"
+            echo "PRECHECK RESULT: FAIL"
+            exit 1
+        fi
+        FIRST_INVENTORY_ENTRY="$(find "$ORA_INVENTORY" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)"
+        INVENTORY_FIND_STATUS=$?
+        if [ "$INVENTORY_FIND_STATUS" -ne 0 ]; then
+            echo "FAIL: Cannot safely inspect undeclared Oracle Inventory: $ORA_INVENTORY"
+            echo "PRECHECK RESULT: FAIL"
+            exit 1
+        elif [ -n "$FIRST_INVENTORY_ENTRY" ]; then
+            echo "FAIL: Undeclared Oracle Inventory is not empty: $ORA_INVENTORY"
+            echo "DBA review is required before installation."
+            echo "PRECHECK RESULT: FAIL"
+            exit 1
+        fi
+    fi
 fi
 
 SOFTWARE_INVENTORY_FILE="$ORA_INVENTORY/ContentsXML/inventory.xml"
-if [ -e "$INSTALL_MARKER" ] || [ -L "$INSTALL_MARKER" ] ||
-   { [ -f "$SOFTWARE_INVENTORY_FILE" ] &&
-     grep -Fq "LOC=\"$ORACLE_HOME\"" "$SOFTWARE_INVENTORY_FILE"; }; then
+if [ -L "$SOFTWARE_INVENTORY_FILE" ] ||
+   { [ -e "$SOFTWARE_INVENTORY_FILE" ] && [ ! -f "$SOFTWARE_INVENTORY_FILE" ]; }; then
+    echo "FAIL: Oracle Inventory file must be a regular file: $SOFTWARE_INVENTORY_FILE"
+    echo "PRECHECK RESULT: FAIL"
+    exit 1
+elif [ -f "$SOFTWARE_INVENTORY_FILE" ]; then
+    if [ ! -r "$SOFTWARE_INVENTORY_FILE" ]; then
+        echo "FAIL: Oracle Inventory file is not readable: $SOFTWARE_INVENTORY_FILE"
+        echo "PRECHECK RESULT: FAIL"
+        exit 1
+    fi
+    grep -Fq "LOC=\"$ORACLE_HOME\"" "$SOFTWARE_INVENTORY_FILE"
+    INVENTORY_GREP_STATUS=$?
+    if [ "$INVENTORY_GREP_STATUS" -eq 0 ]; then
+        echo "FAIL: Oracle Software is already installed: $ORACLE_HOME"
+        echo "PRECHECK RESULT: FAIL"
+        exit 1
+    elif [ "$INVENTORY_GREP_STATUS" -ne 1 ]; then
+        echo "FAIL: Cannot safely read Oracle Inventory file: $SOFTWARE_INVENTORY_FILE"
+        echo "PRECHECK RESULT: FAIL"
+        exit 1
+    fi
+fi
+
+if [ -e "$INSTALL_MARKER" ] || [ -L "$INSTALL_MARKER" ]; then
     echo "FAIL: Oracle Software is already installed: $ORACLE_HOME"
     echo "PRECHECK RESULT: FAIL"
     exit 1
