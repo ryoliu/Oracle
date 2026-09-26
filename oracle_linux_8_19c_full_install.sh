@@ -22,8 +22,9 @@ unset ORACLE_PASSWORD DB_PASSWORD PASSWORD_CONFIRM DB_PASSWORD_RSP
 #   5. Optionally create and verify one single-instance non-CDB.
 #
 # Stop policy:
-#   - Installed Oracle Software stops the script before any deployment input.
-#   - Software and root-script markers are audit evidence, not resume points.
+#   - New state runs the complete Software installation path.
+#   - Verified complete Software may be reused only with --create-db.
+#   - Software and root-script markers never permit partial installation resume.
 #   - SID, Listener name, and Listener port must all be unused for a new install.
 #   - Unknown or partial state stops for DBA review; it is not repaired automatically.
 
@@ -57,6 +58,7 @@ LISTENER_PORT=""
 DB_SERVICE=""
 DB_HOST=""
 CREATE_DB=0
+DB_ONLY=0
 DB_SECRET_DIR=""
 DB_WORKER_PID=""
 CURRENT_STAGE="input validation"
@@ -137,7 +139,7 @@ for SCRIPT_OPTION in "$@"; do
         --help)
             echo "Usage: $0 [--create-db] [--set-password] [--help]"
             echo "Default: prepare Oracle Linux and install Oracle 19c software only."
-            echo "--create-db: also create a single-instance non-CDB after installation."
+            echo "--create-db: create a single-instance non-CDB after a new installation or with verified existing software."
             echo "--set-password: reset the existing oracle OS account password."
             exit 0
             ;;
@@ -190,23 +192,53 @@ fi
 echo ""
 echo "=== Mandatory PreCheck ==="
 
-# PreCheck evaluates Oracle Software first. Installed software stops here before
-# the script asks for passwords, SID, or Listener port.
-if ! bash "$PRECHECK_SCRIPT"; then
+# PreCheck evaluates Oracle Software first. Only --create-db may reuse a
+# complete project-managed Oracle Home; every partial or unknown state stops.
+if [ "$CREATE_DB" -eq 1 ]; then
+    PRECHECK_ALLOW_COMPLETE="--allow-complete-software"
+else
+    PRECHECK_ALLOW_COMPLETE=""
+fi
+
+if [ -n "$PRECHECK_ALLOW_COMPLETE" ]; then
+    bash "$PRECHECK_SCRIPT" "$PRECHECK_ALLOW_COMPLETE"
+else
+    bash "$PRECHECK_SCRIPT"
+fi
+PRECHECK_STATUS=$?
+if [ "$PRECHECK_STATUS" -ne 0 ]; then
     echo "ERROR: Mandatory PreCheck failed. No system changes were made."
     exit 1
 fi
 
 echo "Mandatory general PreCheck completed successfully."
 
-if [ -z "${PACKAGE_NAME:-}" ] || [ -z "${LIMITS_FILE:-}" ] ||
-   [ -z "${SELINUX_CONFIG:-}" ] || [ -z "${TIMEZONE:-}" ] ||
-   [ -z "${SOFTWARE_SOURCE_DIR:-}" ] || [ -z "${ZIP_FILE:-}" ] ||
-   [ -z "${ORACLE_BASE:-}" ] || [ -z "${ORACLE_OWNER:-}" ] ||
-   [ -z "${ORACLE_GROUP:-}" ] || [ -z "${LOCAL_BIN_DIR:-}" ] ||
-   [ -z "${DATA_DIR:-}" ]; then
-    echo "ERROR: Base installation settings are missing from: $CONFIG_FILE"
+if [ "$CREATE_DB" -eq 1 ] && [ -s "$INSTALL_MARKER" ]; then
+    DB_ONLY=1
+    echo "Verified existing Oracle Software will be used for database-only creation."
+fi
+
+if [ "$DB_ONLY" -eq 1 ] && [ "$PASSWORD_RESET_REQUESTED" -eq 1 ]; then
+    echo "ERROR: --set-password cannot be combined with database-only creation."
     exit 1
+fi
+
+if [ "$DB_ONLY" -eq 1 ]; then
+    if [ -z "${ORACLE_BASE:-}" ] || [ -z "${ORACLE_OWNER:-}" ] ||
+       [ -z "${ORACLE_GROUP:-}" ] || [ -z "${DATA_DIR:-}" ]; then
+        echo "ERROR: Database-only base settings are missing from: $CONFIG_FILE"
+        exit 1
+    fi
+else
+    if [ -z "${PACKAGE_NAME:-}" ] || [ -z "${LIMITS_FILE:-}" ] ||
+       [ -z "${SELINUX_CONFIG:-}" ] || [ -z "${TIMEZONE:-}" ] ||
+       [ -z "${SOFTWARE_SOURCE_DIR:-}" ] || [ -z "${ZIP_FILE:-}" ] ||
+       [ -z "${ORACLE_BASE:-}" ] || [ -z "${ORACLE_OWNER:-}" ] ||
+       [ -z "${ORACLE_GROUP:-}" ] || [ -z "${LOCAL_BIN_DIR:-}" ] ||
+       [ -z "${DATA_DIR:-}" ]; then
+        echo "ERROR: Base installation settings are missing from: $CONFIG_FILE"
+        exit 1
+    fi
 fi
 
 if [ "$CREATE_DB" -eq 1 ]; then
@@ -228,15 +260,18 @@ else
     ORACLE_USER_EXISTED_BEFORE_PREINSTALL=0
 fi
 
-echo ""
-echo "=== 1. Set Oracle Installer Compatibility ==="
+INSTALLER_DISTID=""
+if [ "$DB_ONLY" -eq 0 ]; then
+    echo ""
+    echo "=== 1. Set Oracle Installer Compatibility ==="
 
-INSTALLER_DISTID="OL7"
-# The 19.3 base installer uses the OL7 compatibility identifier on OL8.
-# This changes Installer platform detection only; it does not change the OS.
+    INSTALLER_DISTID="OL7"
+    # The 19.3 base installer uses the OL7 compatibility identifier on OL8.
+    # This changes Installer platform detection only; it does not change the OS.
+fi
 
-# Collect deployment input only after the general PreCheck confirms that the
-# target Oracle Software is not installed and the new-install state is usable.
+# Collect deployment input only after the general PreCheck confirms a usable
+# new-install state or a complete project-managed database-only state.
 if [ ! -t 0 ] || [ ! -t 1 ]; then
     echo "ERROR: Run this script in an interactive terminal."
     exit 1
@@ -274,8 +309,15 @@ if [ "$CREATE_DB" -eq 1 ]; then
 
     echo ""
     echo "=== Database and Listener Target PreCheck ==="
-    if ! bash "$PRECHECK_SCRIPT" --target-only \
-        --sid "$ORACLE_SID" --listener-port "$LISTENER_PORT"; then
+    if [ "$DB_ONLY" -eq 1 ]; then
+        bash "$PRECHECK_SCRIPT" --target-only --allow-complete-software \
+            --sid "$ORACLE_SID" --listener-port "$LISTENER_PORT"
+    else
+        bash "$PRECHECK_SCRIPT" --target-only \
+            --sid "$ORACLE_SID" --listener-port "$LISTENER_PORT"
+    fi
+    TARGET_PRECHECK_STATUS=$?
+    if [ "$TARGET_PRECHECK_STATUS" -ne 0 ]; then
         echo "ERROR: Database and Listener target PreCheck failed. No system changes were made."
         exit 1
     fi
@@ -326,9 +368,17 @@ if [ "$CREATE_DB" -eq 1 ]; then
 fi
 echo "=== Installation settings ==="
 echo "Configuration: $CONFIG_FILE"
-echo "Oracle Home: $ORACLE_HOME; Base: $ORACLE_BASE; timezone: $TIMEZONE"
-echo "root.sh local bin: $LOCAL_BIN_DIR; existing helper scripts will be preserved."
-if [ "$CREATE_DB" -eq 1 ]; then
+echo "Oracle Home: $ORACLE_HOME; Base: $ORACLE_BASE"
+if [ "$DB_ONLY" -eq 0 ]; then
+    echo "Timezone: $TIMEZONE; root.sh local bin: $LOCAL_BIN_DIR"
+    echo "Existing helper scripts will be preserved."
+fi
+if [ "$DB_ONLY" -eq 1 ]; then
+    echo "Mode: database only with verified existing software; SID: $ORACLE_SID; Listener: LSNR_$ORACLE_SID:$LISTENER_PORT"
+    echo "Host: $DB_HOST; service: $DB_SERVICE; DATA: $DATA_DIR; FRA: $FRA_DIR"
+    echo "Database memory: $TOTAL_MEMORY_MB MB; FRA limit: $FRA_SIZE_MB MB"
+    echo "Character sets: $CHARACTER_SET / $NATIONAL_CHARACTER_SET"
+elif [ "$CREATE_DB" -eq 1 ]; then
     echo "Mode: software and database; SID: $ORACLE_SID; Listener: LSNR_$ORACLE_SID:$LISTENER_PORT"
     echo "Host: $DB_HOST; service: $DB_SERVICE; DATA: $DATA_DIR; FRA: $FRA_DIR"
     echo "Database memory: $TOTAL_MEMORY_MB MB; FRA limit: $FRA_SIZE_MB MB"
@@ -337,6 +387,7 @@ else
     echo "Mode: software only; no Listener or database will be created."
 fi
 
+if [ "$DB_ONLY" -eq 0 ]; then
 CURRENT_STAGE="software installation"
 # BEGIN SOFTWARE INSTALLATION
 
@@ -1009,6 +1060,13 @@ echo "Oracle Database 19c software is registered in Inventory."
 
 echo ""
 # END SOFTWARE INSTALLATION
+else
+    echo ""
+    echo "=== Existing Oracle Software ==="
+    echo "Oracle Home: $ORACLE_HOME"
+    echo "Inventory: $ORA_INVENTORY"
+    echo "Software installation and root scripts are skipped for this database-only run."
+fi
 
 if [ "$CREATE_DB" -eq 1 ]; then
     CURRENT_STAGE="database creation"
@@ -1428,8 +1486,12 @@ if [ "$CREATE_DB" -eq 1 ]; then
 else
     echo "Software-only mode completed. No database was created."
 fi
-echo "Oracle Database 19c installer success and Inventory registration were verified."
-echo "Reboot is required to fully disable SELinux."
+echo "Oracle Database 19c Software state and Inventory registration were verified."
+if [ "$DB_ONLY" -eq 0 ]; then
+    echo "Reboot is required to fully disable SELinux."
+else
+    echo "Database-only mode did not modify operating-system or Oracle Software settings."
+fi
 echo "New oracle Bash terminals load ~/.oracle_env automatically."
 echo "For an existing oracle session, run once: . ~/.oracle_env"
 

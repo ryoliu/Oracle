@@ -15,17 +15,18 @@
 設計目標：
 
 - 簡單
-- 可安全再次呼叫；如果本次執行開始前已存在目標 Oracle Software，立即停止
+- 可安全再次呼叫；Software 尚未安裝時執行完整安裝，已驗證完整的專案 Software 只允許 `--create-db` Database-only 流程
 - 容易維護
 - 容易除錯
 - 不使用進階 Shell 技巧
 - 固定環境參數由 `oracle_install.conf` 提供
 - `ORACLE_SID` 與 `LISTENER_PORT` 由 DBA 執行時人工輸入
-- 本次執行開始前若已存在 Oracle Software，不得進入續跑流程
-- 只有本次執行開始時 Oracle Software 尚未安裝，才允許進入新的完整安裝流程
+- 本次執行開始前若已存在 Oracle Software，必須先分類為完整、部分完成或未知狀態
+- 只有完整且由本專案 Marker 與 Inventory 驗證一致的 Software，才允許在 `--create-db` 下略過 Software 階段
+- 未完成的 Software 安裝不支援跨次續跑、補跑 root scripts 或自動修復
 
-> 本文件中的「既有 Oracle Software」或「Software 已安裝後重跑」是指 **本次 Main Script 啟動之前就已經存在** 的 Oracle Software。  
 > 本次 Main Script 自己成功完成 `runInstaller` 後，仍屬於同一次受支援的新安裝 invocation，必須繼續執行同一次流程中的 root scripts、Listener／Database creation-blocking checks、Database 建立與 PostCheck。
+> 下一次執行只有在指定 `--create-db`，且既有 Software 通過完整狀態驗證時，才允許執行 Database-only provisioning。這不是未完成 Software 安裝的 cross-run resume。
 
 ---
 
@@ -114,7 +115,7 @@ ORACLE_SID
 LISTENER_PORT
 ```
 
-只有確認本次 Main Script 啟動時 Oracle Software 尚未安裝後，才由 DBA 人工輸入這兩個值，完成格式與範圍驗證後，再由主安裝 Script 傳給後續步驟。不得從舊 Profile、`/etc/oratab`、舊 Listener 或其他既有設定反推輸入值。
+只有 Software hard gate 確認狀態為全新安裝，或確認為 `--create-db` 可使用的完整專案 Software 後，才由 DBA 人工輸入這兩個值，完成格式與範圍驗證後，再由主安裝 Script 傳給後續步驟。不得從舊 Profile、`/etc/oratab`、舊 Listener 或其他既有設定反推輸入值。
 
 不要再解析舊設定來決定：
 
@@ -199,7 +200,9 @@ inst_group != ORACLE_GROUP
 全新主機                                      → 支援
 本次執行開始前 Software 尚未安裝              → 支援新的完整安裝
 本次執行自己剛完成 Software 安裝              → 支援繼續同一次 invocation
-下一次執行發現 Software 已經存在              → 不支援續跑，立即停止
+完整專案 Software + --create-db               → 支援 Database-only
+完整專案 Software + 未指定 --create-db        → FAIL
+部分完成、未知或不一致 Software               → FAIL
 
 舊 Oracle Home                                → 不支援
 舊 Database                                   → 不支援
@@ -223,11 +226,11 @@ inst_group != ORACLE_GROUP
 
 ---
 
-### 3. Oracle Software 是本次執行開始時的第一個停止條件
+### 3. Oracle Software 狀態是本次執行開始時的第一個 Hard Gate
 
 固定環境參數由 `oracle_install.conf` 提供；`ORACLE_SID` 與 `LISTENER_PORT` 使用 DBA 本次執行時輸入的值。
 
-PreCheck 必須先判斷 **本次執行開始前** 目標 Oracle Software 是否已安裝。這項檢查必須位於 SID、Listener Port、作業系統密碼及 Database 密碼輸入之前。
+PreCheck 必須先判斷 **本次執行開始前** 目標 Oracle Software 屬於 `NEW`、`COMPLETE` 或 `INVALID`。這項檢查必須位於 SID、Listener Port、作業系統密碼及 Database 密碼輸入之前。
 
 Software hard gate 的判斷順序固定為：
 
@@ -249,58 +252,47 @@ Software hard gate 的判斷順序固定為：
 5. Oracle Software Inventory 判斷永遠只使用：
    $ORA_INVENTORY/ContentsXML/inventory.xml
 
-6. 檢查 Installer completion Marker。
+6. 檢查 Installer completion Marker 是否為 regular、readable 且非空檔案。
 
-7. 檢查 root-script Marker 是否呈現 partial / inconsistent state。
+7. 檢查 orainstRoot.sh 與 root.sh Marker 是否為 regular、readable file；目前這兩個 Marker 可為空檔案。
 
-8. 檢查 ORACLE_HOME 是否為正常目錄且符合尚未安裝 Software 的新安裝狀態。
+8. 檢查 ORACLE_HOME 是否為正常目錄，並判斷為空的新安裝狀態或完整 Software 狀態。
 
-9. Software hard gate 通過後，才允許進入其餘 read-only prerequisite、
-   SID、Listener 與 Port 檢查。
+9. 完整 Software 必須同時滿足：oraInst.loc 一致、Inventory 登錄相同 ORACLE_HOME、
+   三個 Marker 全部存在，以及 runInstaller、root.sh、orainstRoot.sh、dbca、lsnrctl、
+   sqlplus、DBCA response template、dbs 與 /etc/oratab 可安全使用。
+
+10. Software hard gate 通過後，才允許進入其餘 read-only prerequisite、
+    SID、Listener 與 Port 檢查。
 ```
 
 不得先採用 `/etc/oraInst.loc` 指向的其他 Inventory，再用該路徑判斷 Oracle Software 是否存在。
 
-只要確認本次執行開始前目標 Oracle Software 已安裝，就立即 `ERROR + exit 1`，不得把 Software 階段設為 SKIP 後繼續執行。
-
-判斷順序固定為：
+狀態判斷固定為：
 
 ```text
-本次執行開始前 Oracle Software 已安裝
-→ STOP
-→ 不做額外安裝階段檢查
-→ 不進入 SID / Listener / Database 新建流程
-
-本次執行開始前 Oracle Software 未安裝
+NEW：Inventory 未登錄目標 ORACLE_HOME、三個 Marker 均不存在、ORACLE_HOME 不存在或為空
 → 通過 Software hard gate
 → 才允許檢查新的 SID、Listener Name 與 Listener Port
 → 才允許進入新的完整安裝流程
+
+COMPLETE：oraInst.loc、Inventory、三個 Marker、ORACLE_HOME 與必要 Oracle tools 全部一致
+→ 未指定 --create-db 時 FAIL
+→ 指定 --create-db 時允許 Database-only
+→ 不執行套件安裝、系統設定、Software 解壓、runInstaller 或 root scripts
+
+INVALID：任何介於 NEW 與 COMPLETE 之間、無法安全讀取或互相不一致的狀態
+→ FAIL
+→ DBA review
 ```
 
-偵測到 **pre-existing Oracle Software** 後，不得再為了續跑或接管而檢查或處理：
+COMPLETE 只允許建立新的 Database，不代表允許一般性的 cross-run resume。不得因 Marker 缺少而補跑 root scripts，不得重新執行 runInstaller，不得修復 Software，也不得接管沒有本專案完整 Marker 的 Oracle Home。
 
-- RU
-- OPatch
-- `orainstRoot.sh`
-- `root.sh`
-- Listener
-- Database
-- Profile
-- PostCheck
+Database-only 不執行 Main 的作業系統修改階段。PreCheck 若發現 preinstall package、SELinux、firewalld、iptables 或 timezone 已偏離本專案完整安裝後的必要狀態，必須 FAIL，不得以「Main 稍後會修正」的 WARN 繼續。
 
-不再允許：
+如果 Oracle Home、Inventory、Marker 或必要 Oracle tools 處於未知、部分完成、不一致或無法安全判斷的狀態，必須在 Software hard gate 階段立即停止，交由 DBA 處理。
 
-```text
-下一次執行發現 Software 已安裝
-→ SKIP software
-→ 繼續建 Listener / Database
-```
-
-Oracle Inventory 已有目標 `ORACLE_HOME`、Installer completion Marker 存在，或其他既有判斷已足以確認目標 Software 在本次執行開始前已經完成安裝時，都必須立即停止。停止後不得為了判斷是否可以接續而再驗證其他安裝階段。
-
-如果 Software 尚未安裝，但發現 Oracle Home、Inventory 或 Marker 處於未知、部分完成、不一致或無法安全判斷的狀態，同樣在 Software hard gate 階段立即停止，交由 DBA 處理；不得自動重裝、修復或接管。
-
-### 同一次 invocation 的例外
+### 支援的兩種 Database 建立路徑
 
 以下情境不是 cross-run resume：
 
@@ -319,7 +311,18 @@ Oracle Inventory 已有目標 `ORACLE_HOME`、Installer completion Marker 存在
 
 此時 Oracle Software 雖然已經存在，但它是 **本次 Main Script 自己剛安裝完成** 的結果，因此必須繼續同一次 invocation。
 
-不得把這個情境誤判為「Software 已安裝後重跑」。
+另一個受支援路徑是：
+
+```text
+本次 Main Script 以 --create-db 啟動
+→ Software hard gate 確認既有 Software 為 COMPLETE
+→ 略過全部 Software 與 root-script 階段
+→ Target PreCheck 通過
+→ 再次確認 SID / Listener Name / Listener Port
+→ 建立新的 Listener、Database、Host Profile 並執行 PostCheck
+```
+
+這是針對已驗證專案 Oracle Home 的跨次 Database provisioning，不是未完成 Software 安裝的續跑。
 
 ---
 
@@ -367,7 +370,7 @@ Host Profile 不進行：
 
 ### 5. Oracle Software 與 root scripts
 
-`orainstRoot.sh` 與 `root.sh` 只屬於同一次全新安裝流程。它們可以在本次 Main Script 中依序執行並於成功後記錄 Marker，但不得用於下一次執行的續跑判斷。
+`orainstRoot.sh` 與 `root.sh` 只屬於同一次全新 Software 安裝流程。它們可以在本次 Main Script 中依序執行並於成功後記錄 Marker，但不得在 Database-only 流程中再次執行。
 
 ```text
 本次 Main Script 的 runInstaller 成功
@@ -375,12 +378,16 @@ Host Profile 不進行：
 → 執行 root.sh
 → 繼續同一次 invocation 的 Listener / Database 流程
 
-下一次執行在 Software hard gate 偵測到 Software 已安裝
-→ 立即 STOP
-→ 不檢查 orainstRoot.sh 或 root.sh Marker
+下一次執行以 --create-db 啟動
+→ 只有三個 Marker、Inventory 與必要 tools 全部一致才允許 Database-only
+→ 略過 orainstRoot.sh 與 root.sh
+
+Marker 缺少、型態錯誤或與 Inventory 不一致
+→ FAIL
+→ 不補跑任何 root script
 ```
 
-不得使用 `INSTALL_REQUIRED=N`、Installer Marker 或 Inventory 將 Software 階段設成 SKIP，再於 **下一次執行** 繼續任何 root script、Listener 或 Database 工作。
+不得使用單一 Marker 或單一 Inventory 判斷將 Software 階段設成 SKIP。只有 `--create-db` 且完整 Software hard gate 全部通過，才允許設定 Database-only mode。
 
 可以保留下列 Marker 作為稽核與衝突證據：
 
@@ -390,13 +397,13 @@ ORAINST_ROOT_MARKER="$ORA_INVENTORY/.orainstRoot_complete"
 ROOT_SH_MARKER="$ORACLE_HOME/.root_sh_complete"
 ```
 
-只有對應步驟成功後才能建立 Marker。Marker 不代表下一次執行可以 SKIP 該階段並繼續；下一次執行只要確認 Oracle Software 已經存在，就立即停止，不得再使用 root-script Marker 判斷是否可以補跑。
+只有對應步驟成功後才能建立 Marker。三個 Marker 必須與 oraInst.loc、Inventory、ORACLE_HOME 與必要 Oracle tools 一起驗證；任何單一 Marker 都不代表可以略過安裝。Database-only 只能使用完整集合判斷，而且 Marker 只能證明可略過，不能作為補跑 root scripts 的依據。
 
 不允許：
 
-- 使用 `INSTALL_REQUIRED=N` 在下一次執行繼續後續安裝階段。
+- 使用 `INSTALL_REQUIRED=N` 或類似旗標續跑部分完成的 Software 安裝。
 - 因 `ORAINST_ROOT_MARKER` 或 `ROOT_SH_MARKER` 不存在而在下一次執行補跑 root scripts。
-- 使用 `/etc/oraInst.loc`、`/etc/oratab` 或 `oraenv` 判斷是否可以跨次續跑。
+- 單獨使用 `/etc/oraInst.loc`、`/etc/oratab` 或 `oraenv` 判斷是否可以進入 Database-only 或跨次續跑。
 - 自動刪除 Oracle Home、Inventory 或 Marker。
 - 自動重裝、修復或接管既有 Oracle Software。
 
@@ -404,18 +411,19 @@ ROOT_SH_MARKER="$ORACLE_HOME/.root_sh_complete"
 
 ### 6. SID / Listener / Database 衝突規則
 
-這一節要區分兩個時間點：
+這一節要區分三個時間點：
 
 ```text
 A. 本次 Main Script 啟動後、runInstaller 前
 B. 本次 Main Script 已成功安裝 Software 後、真正建立 Listener / Database 前
+C. Database-only 啟動後、真正建立 Listener / Database 前
 ```
 
-A 階段只有在 Software hard gate 確認 **本次執行開始前 Software 尚未安裝** 時才允許執行。
+A 階段在 Software hard gate 確認 `NEW` 後執行。C 階段只有在指定 `--create-db` 且 Software hard gate 確認 `COMPLETE` 後執行。
 
-B 階段屬於同一次 invocation 的第二層 creation-blocking check。即使 Software 已由本次 Main Script 安裝完成，仍必須再次檢查 SID、Listener Name 與 Listener Port，避免從 PreCheck 到實際建立資源之間狀態發生改變。
+B 與 C 階段都必須再次檢查 SID、Listener Name 與 Listener Port，避免從 Target PreCheck 到實際建立資源之間狀態發生改變。
 
-如果是 **下一次執行**，Software hard gate 發現 Software 已存在時，必須在進入 A 或 B 階段之前停止。
+Database-only 不得略過 Target PreCheck 或 Main 的 creation-blocking check。
 
 #### ORACLE_SID 不得重複使用
 
@@ -487,8 +495,14 @@ PreCheck 分為兩個階段。
 第一階段是 Oracle Software hard gate：
 
 ```text
-本次執行開始前 Oracle Software 已安裝
-或 Software、Oracle Home、Inventory、Marker 處於部分完成、不一致或無法安全判斷的狀態
+Software 狀態為 NEW
+→ 允許完整安裝
+
+Software 狀態為 COMPLETE + --create-db
+→ 允許 Database-only
+
+Software 狀態為 COMPLETE + 未指定 --create-db
+或 Software、Oracle Home、Inventory、Marker、必要 tools 處於部分完成、不一致或無法安全判斷的狀態
 → 立即輸出 PRECHECK RESULT: FAIL
 → exit 1
 → 不執行其他 OS、SID、Listener、Database 或 Port 檢查
@@ -503,9 +517,10 @@ Software hard gate 至少要先判斷：
 - /etc/oraInst.loc 的 inst_group 是否等於 ORACLE_GROUP
 - /etc/oraInst.loc 不存在時，ORA_INVENTORY 若已存在是否仍為空目錄
 - 只使用 $ORA_INVENTORY/ContentsXML/inventory.xml 判斷目標 ORACLE_HOME
-- Installer completion Marker 是否存在
-- root-script Marker 是否呈現 partial / inconsistent state
-- ORACLE_HOME 是否為正常目錄且符合尚未安裝 Software 的新安裝狀態
+- Installer completion Marker 是否為 regular、readable 且非空
+- 兩個 root-script Marker 是否為 regular、readable file
+- ORACLE_HOME 是否為正常目錄且符合 NEW 或 COMPLETE 狀態
+- COMPLETE 狀態需要的 Oracle tools、DBCA template、dbs 與 /etc/oratab 是否可安全使用
 ```
 
 `oracle_install.conf` 是 source of truth；不得先採用 `/etc/oraInst.loc` 指向的其他 Inventory，再以該 Inventory 決定是否繼續。
@@ -539,14 +554,21 @@ Target PreCheck 必須涵蓋：
 
 依賴 SID 或 Listener Port 的檢查，在對應輸入格式無效時可以標示為未執行；不得使用無效輸入執行修改操作。完成 read-only 檢查後，只要 `FAIL_COUNT` 大於零，就必須輸出 `PRECHECK RESULT: FAIL` 並 `exit 1`。只有零 FAIL 才能讓 Main 繼續。
 
-Main Script 必須在 **本次 invocation 已成功完成 Software 與 root scripts 後、真正建立 Listener／Database 前**，再次確認 SID、Listener Name 與 Listener Port 未被使用。
+Main Script 必須在真正建立 Listener／Database 前，再次確認 SID、Listener Name 與 Listener Port 未被使用。完整安裝與 Database-only 都適用。
 
-這個第二層檢查是同一次 invocation 的 creation-blocking check，不是 Software 已安裝後重跑，也不是 cross-run resume。
+這個第二層檢查是 creation-blocking check，不是既有 Database 的 resume 或 adoption。
 
 整體判斷：
 
 ```text
-本次執行開始前 Software 已安裝
+本次執行開始前 Software COMPLETE + 未指定 --create-db
+→ STOP
+
+本次執行開始前 Software COMPLETE + --create-db
+→ 略過 Software 與 root scripts
+→ 檢查新的 SID / Listener / Port
+
+本次執行開始前 Software partial / unknown / inconsistent
 → STOP
 
 本次執行開始前 Software 未安裝 + SID 已使用
@@ -565,6 +587,10 @@ Main Script 必須在 **本次 invocation 已成功完成 Software 與 root scri
 → 允許進入新的完整安裝
 
 本次 invocation 的 runInstaller / root scripts 成功
+→ 再次確認 SID / Listener Name / Listener Port
+→ 無衝突才建立 Listener / Database
+
+Database-only 的 Target PreCheck 成功
 → 再次確認 SID / Listener Name / Listener Port
 → 無衝突才建立 Listener / Database
 ```
@@ -602,6 +628,8 @@ oraInst.loc 不存在 + ORA_INVENTORY 非空
 → unknown Inventory
 → DBA review
 ```
+
+Database-only 模式下，`ORACLE_BASE`、`ORACLE_HOME` 與 `ORA_INVENTORY` 必須已存在且符合完整 Software 驗證結果，不得由 Main 補建或修復。新的 `DATA_DIR` 與 `FRA_DIR` storage root 仍可在 Database 建立階段依既有規則建立。
 
 不要：
 

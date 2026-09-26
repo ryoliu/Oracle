@@ -7,7 +7,7 @@
 設計原則：
 
 - 簡單
-- Profile 管理邏輯在同一次受支援的新安裝流程中可安全執行
+- Profile 管理邏輯在受支援的新安裝或已驗證 Software 的 Database-only 流程中可安全執行
 - 容易維護
 - 容易除錯
 - 不使用進階 Shell 技巧
@@ -38,7 +38,7 @@ DATA_DIR
 FRA_DIR
 ```
 
-固定環境參數仍由 `oracle_install.conf` 提供；`ORACLE_SID` 與 `LISTENER_PORT` 仍由本次受支援的新安裝流程取得。
+固定環境參數仍由 `oracle_install.conf` 提供；`ORACLE_SID` 與 `LISTENER_PORT` 仍由本次受支援的新安裝或 Database-only 流程取得。
 
 Host Profile 可以在通過 Oracle Software、SID、Listener 與 Database 新安裝衝突檢查後，由本次流程寫入固定內容；這不代表 Profile 可以用來接管或判斷既有 Oracle 環境。
 

@@ -6,9 +6,9 @@
 
 - Shell Script 必須保持簡單且容易閱讀。
 - 腳本必須可以安全地再次執行。
-- 對於本專案的一次性 Oracle Installer，「可安全再次執行」表示再次呼叫時，會先檢查既有 Oracle 安裝狀態；若在本次執行開始前已存在目標 Oracle Software，必須乾淨地停止，且不得修改現有環境。
-- 可安全再次執行不代表支援跨次續跑、跳過已完成階段後繼續，或自動修復部分完成的安裝。
-- 不支援跨次執行續跑（resume）。
+- 對於本專案的一次性 Oracle Installer，「可安全再次執行」表示再次呼叫時，會先檢查既有 Oracle 安裝狀態。若 Oracle Software 尚未安裝，執行完整的新機安裝流程；若指定 `--create-db`，且 Software 經 Inventory、Installer Marker、兩個 root-script Marker 與必要 Oracle tools 驗證為本專案完整安裝的狀態，允許略過 Software 階段建立新的 Database。其他既有、部分完成、未知或不一致狀態必須乾淨地停止。
+- 可安全再次執行不代表支援一般性的跨次續跑、任意跳過已完成階段，或自動修復部分完成的安裝；唯一例外是上述完整驗證後的 `--create-db` Database-only 流程。
+- 不支援未完成安裝的跨次續跑（resume）。已驗證完整 Software 的 `--create-db` Database-only 流程不是 Software resume，不得補跑 root scripts、修復 Software 或接管未知 Oracle Home。
 - 除非確實有需要，否則不要使用進階 Shell 技巧。
 - 優先採用以下流程：  
   檢查目前狀態 → 必要時修改 → 驗證結果。
@@ -35,7 +35,7 @@
 - 合併既有設定
 - 自動修復未知或不明確的既有環境
 
-本次 Main Script 自行成功安裝 Oracle Software 後，可以繼續執行同一次安裝流程中的 root scripts、Listener、Database 與 PostCheck。這不屬於跨次續跑。
+本次 Main Script 自行成功安裝 Oracle Software 後，可以繼續執行同一次安裝流程中的 root scripts、Listener、Database 與 PostCheck。指定 `--create-db` 時，也可以在通過完整 Software hard gate 後，對本專案管理的既有 Oracle Home 執行 Database-only 流程。兩者都不得用於接管未知環境或續跑未完成的 Software 安裝。
 
 ## Shell 工作
 

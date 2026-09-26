@@ -4,7 +4,7 @@
 #
 # Result policy for Main or a DBA:
 #   PASS = requirement is currently satisfied.
-#   WARN = Main can create or change the expected new-server state.
+#   WARN = review is required, but the current supported mode may continue.
 #   FAIL = installation must stop for correction or DBA review.
 # This script never installs packages, edits files, starts services, or creates
 # Oracle resources. It exits 1 when at least one FAIL is recorded.
@@ -26,7 +26,8 @@ if ! . "$CONFIG_FILE"; then
 fi
 
 if [ -z "${ORACLE_HOME:-}" ] || [ -z "${ORA_INVENTORY:-}" ] ||
-   [ -z "${ORAINST_FILE:-}" ] || [ -z "${ORACLE_GROUP:-}" ]; then
+   [ -z "${ORAINST_FILE:-}" ] || [ -z "${ORACLE_OWNER:-}" ] ||
+   [ -z "${ORACLE_GROUP:-}" ]; then
     echo "FAIL: Oracle Home or Inventory settings are missing from: $CONFIG_FILE"
     exit 1
 fi
@@ -41,6 +42,8 @@ DB_HOST=""
 DB_SERVICE=""
 CREATE_DB=0
 TARGET_ONLY=0
+ALLOW_COMPLETE_SOFTWARE=0
+SOFTWARE_STATE="NEW"
 ORACLE_SID=""
 LISTENER_PORT=""
 PASS_COUNT=0
@@ -83,6 +86,10 @@ while [ "$#" -gt 0 ]; do
             TARGET_ONLY=1
             shift
             ;;
+        --allow-complete-software)
+            ALLOW_COMPLETE_SOFTWARE=1
+            shift
+            ;;
         --sid)
             if [ "$#" -lt 2 ]; then
                 echo "FAIL: --sid requires a value."
@@ -111,13 +118,16 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-# Oracle Software is the first stopping condition. Do not inspect root scripts,
-# Listener, Database, Profile, or PostCheck after installed software is found.
-if ! command -v grep >/dev/null 2>&1; then
-    echo "FAIL: Required command is missing: grep"
+# Oracle Software is the first stopping condition. A complete project-managed
+# installation may be reused only for an explicitly requested database run.
+for REQUIRED_COMMAND in grep sed find; do
+    if command -v "$REQUIRED_COMMAND" >/dev/null 2>&1; then
+        continue
+    fi
+    echo "FAIL: Required command is missing: $REQUIRED_COMMAND"
     echo "PRECHECK RESULT: FAIL"
     exit 1
-fi
+done
 
 if [ -L "$ORAINST_FILE" ] ||
    { [ -e "$ORAINST_FILE" ] && [ ! -f "$ORAINST_FILE" ]; }; then
@@ -125,8 +135,8 @@ if [ -L "$ORAINST_FILE" ] ||
     echo "PRECHECK RESULT: FAIL"
     exit 1
 elif [ -f "$ORAINST_FILE" ]; then
-    if ! command -v sed >/dev/null 2>&1; then
-        echo "FAIL: Required command is missing: sed"
+    if [ ! -r "$ORAINST_FILE" ]; then
+        echo "FAIL: oraInst.loc is not readable: $ORAINST_FILE"
         echo "PRECHECK RESULT: FAIL"
         exit 1
     fi
@@ -151,11 +161,6 @@ else
         echo "PRECHECK RESULT: FAIL"
         exit 1
     elif [ -d "$ORA_INVENTORY" ]; then
-        if ! command -v find >/dev/null 2>&1; then
-            echo "FAIL: Required command is missing: find"
-            echo "PRECHECK RESULT: FAIL"
-            exit 1
-        fi
         FIRST_INVENTORY_ENTRY="$(find "$ORA_INVENTORY" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)"
         INVENTORY_FIND_STATUS=$?
         if [ "$INVENTORY_FIND_STATUS" -ne 0 ]; then
@@ -172,6 +177,7 @@ else
 fi
 
 SOFTWARE_INVENTORY_FILE="$ORA_INVENTORY/ContentsXML/inventory.xml"
+TARGET_HOME_REGISTERED=0
 if [ -L "$SOFTWARE_INVENTORY_FILE" ] ||
    { [ -e "$SOFTWARE_INVENTORY_FILE" ] && [ ! -f "$SOFTWARE_INVENTORY_FILE" ]; }; then
     echo "FAIL: Oracle Inventory file must be a regular file: $SOFTWARE_INVENTORY_FILE"
@@ -186,9 +192,7 @@ elif [ -f "$SOFTWARE_INVENTORY_FILE" ]; then
     grep -Fq "LOC=\"$ORACLE_HOME\"" "$SOFTWARE_INVENTORY_FILE"
     INVENTORY_GREP_STATUS=$?
     if [ "$INVENTORY_GREP_STATUS" -eq 0 ]; then
-        echo "FAIL: Oracle Software is already installed: $ORACLE_HOME"
-        echo "PRECHECK RESULT: FAIL"
-        exit 1
+        TARGET_HOME_REGISTERED=1
     elif [ "$INVENTORY_GREP_STATUS" -ne 1 ]; then
         echo "FAIL: Cannot safely read Oracle Inventory file: $SOFTWARE_INVENTORY_FILE"
         echo "PRECHECK RESULT: FAIL"
@@ -196,34 +200,125 @@ elif [ -f "$SOFTWARE_INVENTORY_FILE" ]; then
     fi
 fi
 
-if [ -e "$INSTALL_MARKER" ] || [ -L "$INSTALL_MARKER" ]; then
-    echo "FAIL: Oracle Software is already installed: $ORACLE_HOME"
+INSTALL_MARKER_PRESENT=0
+ORAINST_ROOT_MARKER_PRESENT=0
+ROOT_SH_MARKER_PRESENT=0
+
+if [ -L "$INSTALL_MARKER" ] ||
+   { [ -e "$INSTALL_MARKER" ] && [ ! -f "$INSTALL_MARKER" ]; }; then
+    echo "FAIL: Installer completion marker must be a regular file: $INSTALL_MARKER"
     echo "PRECHECK RESULT: FAIL"
     exit 1
-fi
-
-# Partial software state also stops before unrelated prerequisite checks.
-for PARTIAL_MARKER in "$ORAINST_ROOT_MARKER" "$ROOT_SH_MARKER"; do
-    if [ -e "$PARTIAL_MARKER" ] || [ -L "$PARTIAL_MARKER" ]; then
-        echo "FAIL: Existing completion marker requires DBA review: $PARTIAL_MARKER"
+elif [ -f "$INSTALL_MARKER" ]; then
+    if [ ! -s "$INSTALL_MARKER" ] || [ ! -r "$INSTALL_MARKER" ]; then
+        echo "FAIL: Installer completion marker is empty or unreadable: $INSTALL_MARKER"
         echo "PRECHECK RESULT: FAIL"
         exit 1
     fi
-done
+    INSTALL_MARKER_PRESENT=1
+fi
 
+if [ -L "$ORAINST_ROOT_MARKER" ] ||
+   { [ -e "$ORAINST_ROOT_MARKER" ] && [ ! -f "$ORAINST_ROOT_MARKER" ]; }; then
+    echo "FAIL: Root-script completion marker must be a regular file: $ORAINST_ROOT_MARKER"
+    echo "PRECHECK RESULT: FAIL"
+    exit 1
+elif [ -f "$ORAINST_ROOT_MARKER" ]; then
+    if [ ! -r "$ORAINST_ROOT_MARKER" ]; then
+        echo "FAIL: Root-script completion marker is not readable: $ORAINST_ROOT_MARKER"
+        echo "PRECHECK RESULT: FAIL"
+        exit 1
+    fi
+    ORAINST_ROOT_MARKER_PRESENT=1
+fi
+
+if [ -L "$ROOT_SH_MARKER" ] ||
+   { [ -e "$ROOT_SH_MARKER" ] && [ ! -f "$ROOT_SH_MARKER" ]; }; then
+    echo "FAIL: Root-script completion marker must be a regular file: $ROOT_SH_MARKER"
+    echo "PRECHECK RESULT: FAIL"
+    exit 1
+elif [ -f "$ROOT_SH_MARKER" ]; then
+    if [ ! -r "$ROOT_SH_MARKER" ]; then
+        echo "FAIL: Root-script completion marker is not readable: $ROOT_SH_MARKER"
+        echo "PRECHECK RESULT: FAIL"
+        exit 1
+    fi
+    ROOT_SH_MARKER_PRESENT=1
+fi
+
+ORACLE_HOME_HAS_CONTENT=0
 if [ -L "$ORACLE_HOME" ] || { [ -e "$ORACLE_HOME" ] && [ ! -d "$ORACLE_HOME" ]; }; then
     echo "FAIL: Oracle Home must be a normal directory: $ORACLE_HOME"
     echo "PRECHECK RESULT: FAIL"
     exit 1
 elif [ -d "$ORACLE_HOME" ]; then
-    if ! command -v find >/dev/null 2>&1; then
-        echo "FAIL: Required command is missing: find"
+    FIRST_HOME_ENTRY="$(find "$ORACLE_HOME" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)"
+    HOME_FIND_STATUS=$?
+    if [ "$HOME_FIND_STATUS" -ne 0 ]; then
+        echo "FAIL: Cannot safely inspect Oracle Home: $ORACLE_HOME"
+        echo "PRECHECK RESULT: FAIL"
+        exit 1
+    elif [ -n "$FIRST_HOME_ENTRY" ]; then
+        ORACLE_HOME_HAS_CONTENT=1
+    fi
+fi
+
+if [ "$TARGET_HOME_REGISTERED" -eq 1 ] &&
+   [ "$INSTALL_MARKER_PRESENT" -eq 1 ] &&
+   [ "$ORAINST_ROOT_MARKER_PRESENT" -eq 1 ] &&
+   [ "$ROOT_SH_MARKER_PRESENT" -eq 1 ] &&
+   [ "$ORACLE_HOME_HAS_CONTENT" -eq 1 ] &&
+   [ "$INVENTORY_DECLARED" -eq 1 ]; then
+    SOFTWARE_STATE="COMPLETE"
+elif [ "$TARGET_HOME_REGISTERED" -eq 0 ] &&
+     [ "$INSTALL_MARKER_PRESENT" -eq 0 ] &&
+     [ "$ORAINST_ROOT_MARKER_PRESENT" -eq 0 ] &&
+     [ "$ROOT_SH_MARKER_PRESENT" -eq 0 ] &&
+     [ "$ORACLE_HOME_HAS_CONTENT" -eq 0 ]; then
+    SOFTWARE_STATE="NEW"
+else
+    echo "FAIL: Oracle Software state is partial or inconsistent: $ORACLE_HOME"
+    echo "DBA review is required. No repair or root-script retry was attempted."
+    echo "PRECHECK RESULT: FAIL"
+    exit 1
+fi
+
+if [ "$SOFTWARE_STATE" = "COMPLETE" ]; then
+    if ! id "$ORACLE_OWNER" >/dev/null 2>&1; then
+        echo "FAIL: Oracle owner is missing for the complete Software state: $ORACLE_OWNER"
         echo "PRECHECK RESULT: FAIL"
         exit 1
     fi
-    FIRST_HOME_ENTRY="$(find "$ORACLE_HOME" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)"
-    if [ -n "$FIRST_HOME_ENTRY" ]; then
-        echo "FAIL: Oracle Home is not empty: $ORACLE_HOME"
+    for REQUIRED_GROUP in "$ORACLE_GROUP" dba; do
+        if ! getent group "$REQUIRED_GROUP" >/dev/null 2>&1 ||
+           ! id -nG "$ORACLE_OWNER" | tr ' ' '\n' | grep -Fxq "$REQUIRED_GROUP"; then
+            echo "FAIL: Oracle owner is not a member of required group: $REQUIRED_GROUP"
+            echo "PRECHECK RESULT: FAIL"
+            exit 1
+        fi
+    done
+    for REQUIRED_ORACLE_TOOL in runInstaller root.sh bin/dbca bin/lsnrctl bin/sqlplus; do
+        if [ ! -x "$ORACLE_HOME/$REQUIRED_ORACLE_TOOL" ]; then
+            echo "FAIL: Required Oracle tool is missing or not executable: $ORACLE_HOME/$REQUIRED_ORACLE_TOOL"
+            echo "PRECHECK RESULT: FAIL"
+            exit 1
+        fi
+    done
+    if [ ! -x "$ORA_INVENTORY/orainstRoot.sh" ]; then
+        echo "FAIL: Required Oracle Inventory root script is missing or not executable: $ORA_INVENTORY/orainstRoot.sh"
+        echo "PRECHECK RESULT: FAIL"
+        exit 1
+    fi
+    if [ ! -r "$ORACLE_HOME/assistants/dbca/dbca.rsp" ] ||
+       [ ! -d "$ORACLE_HOME/dbs" ] || [ ! -r "$ORACLE_HOME/dbs" ] ||
+       [ ! -f /etc/oratab ] || [ ! -r /etc/oratab ]; then
+        echo "FAIL: Required database creation assets are missing or unreadable."
+        echo "PRECHECK RESULT: FAIL"
+        exit 1
+    fi
+    if [ "$ALLOW_COMPLETE_SOFTWARE" -ne 1 ]; then
+        echo "FAIL: Oracle Software is already installed: $ORACLE_HOME"
+        echo "Use --create-db to create a new database with this verified Oracle Home."
         echo "PRECHECK RESULT: FAIL"
         exit 1
     fi
@@ -233,6 +328,17 @@ if [ "$TARGET_ONLY" -eq 1 ]; then
     if [ -z "${ORACLE_BASE:-}" ] || [ -z "${ORACLE_OWNER:-}" ] ||
        [ -z "${DATA_DIR:-}" ] || [ -z "${FRA_DIR:-}" ]; then
         echo "FAIL: Database target settings are missing from: $CONFIG_FILE"
+        echo "PRECHECK RESULT: FAIL"
+        exit 1
+    fi
+elif [ "$SOFTWARE_STATE" = "COMPLETE" ]; then
+    if [ -z "${PACKAGE_NAME:-}" ] || [ -z "${PREINSTALL_SYSCTL:-}" ] ||
+       [ -z "${CUSTOM_SYSCTL:-}" ] || [ -z "${LIMITS_FILE:-}" ] ||
+       [ -z "${SELINUX_CONFIG:-}" ] || [ -z "${TIMEZONE:-}" ] ||
+       [ -z "${ORACLE_BASE:-}" ] || [ -z "${ORACLE_OWNER:-}" ] ||
+       [ -z "${ORACLE_GROUP:-}" ] || [ -z "${DATA_DIR:-}" ] ||
+       [ -z "${FRA_DIR:-}" ]; then
+        echo "FAIL: Database-only settings are missing from: $CONFIG_FILE"
         echo "PRECHECK RESULT: FAIL"
         exit 1
     fi
@@ -366,13 +472,15 @@ fi
 echo ""
 echo "=== Package and operating system settings ==="
 
-# A missing preinstall package is a warning only when yum can provide it,
-# because Main owns the package installation step on a new server.
+# A missing preinstall package is a warning only for a new Software install
+# when yum can provide it. Database-only mode never installs the package.
 if rpm -q "$PACKAGE_NAME" >/dev/null 2>&1; then
     PACKAGE_INSTALLED=1
     record_pass "Package is installed: $PACKAGE_NAME"
 else
-    if ! command -v yum >/dev/null 2>&1; then
+    if [ "$SOFTWARE_STATE" = "COMPLETE" ]; then
+        record_fail "Package is missing for database-only mode: $PACKAGE_NAME"
+    elif ! command -v yum >/dev/null 2>&1; then
         record_fail "Package is not installed and yum is unavailable: $PACKAGE_NAME"
     elif yum -q list available "$PACKAGE_NAME" >/dev/null 2>&1; then
         record_warn "Package is available and will be installed: $PACKAGE_NAME"
@@ -407,7 +515,15 @@ fi
 
 if [ -r "$SELINUX_CONFIG" ]; then
     CURRENT_SELINUX="$(getenforce 2>/dev/null)"
-    if [ "$CURRENT_SELINUX" = "Disabled" ]; then
+    if [ "$SOFTWARE_STATE" = "COMPLETE" ]; then
+        if ! grep -qx "SELINUX=disabled" "$SELINUX_CONFIG"; then
+            record_fail "Persistent SELinux configuration must already be disabled for database-only mode."
+        elif [ "$CURRENT_SELINUX" = "Disabled" ] || [ "$CURRENT_SELINUX" = "Permissive" ]; then
+            record_pass "SELinux is not enforcing and persistent configuration is disabled."
+        else
+            record_fail "SELinux must not be enforcing for database-only mode: ${CURRENT_SELINUX:-unknown}"
+        fi
+    elif [ "$CURRENT_SELINUX" = "Disabled" ]; then
         record_pass "SELinux is disabled."
     else
         record_warn "SELinux is ${CURRENT_SELINUX:-unknown}; the installer will configure it as disabled."
@@ -416,15 +532,27 @@ else
     record_fail "SELinux configuration file is not readable: $SELINUX_CONFIG"
 fi
 
+SERVICE_INSPECTION_OK=1
+if ! SERVICE_UNITS="$(systemctl list-unit-files --type=service 2>/dev/null)"; then
+    record_fail "Cannot inspect system service definitions."
+    SERVICE_INSPECTION_OK=0
+fi
+
 for SERVICE_NAME in firewalld iptables; do
-    if systemctl list-unit-files --type=service 2>/dev/null | grep -q "^${SERVICE_NAME}\.service[[:space:]]"; then
+    if [ "$SERVICE_INSPECTION_OK" -ne 1 ]; then
+        continue
+    elif printf '%s\n' "$SERVICE_UNITS" | grep -q "^${SERVICE_NAME}\.service[[:space:]]"; then
         SERVICE_ACTIVE="$(systemctl is-active "$SERVICE_NAME" 2>/dev/null)"
         SERVICE_ENABLED="$(systemctl is-enabled "$SERVICE_NAME" 2>/dev/null)"
         if [ "$SERVICE_ACTIVE" = "inactive" ] &&
            { [ "$SERVICE_ENABLED" = "disabled" ] || [ "$SERVICE_ENABLED" = "masked" ]; }; then
             record_pass "$SERVICE_NAME is inactive and not enabled."
         else
-            record_warn "$SERVICE_NAME will be stopped and disabled; active=$SERVICE_ACTIVE enabled=$SERVICE_ENABLED"
+            if [ "$SOFTWARE_STATE" = "COMPLETE" ]; then
+                record_fail "$SERVICE_NAME must already be inactive and disabled for database-only mode; active=$SERVICE_ACTIVE enabled=$SERVICE_ENABLED"
+            else
+                record_warn "$SERVICE_NAME will be stopped and disabled; active=$SERVICE_ACTIVE enabled=$SERVICE_ENABLED"
+            fi
         fi
     else
         record_pass "Service is not installed: $SERVICE_NAME"
@@ -443,7 +571,11 @@ CURRENT_TIMEZONE="$(LC_ALL=C timedatectl 2>/dev/null | awk -F: '
 if [ "$CURRENT_TIMEZONE" = "$TIMEZONE" ]; then
     record_pass "Timezone is configured: $TIMEZONE"
 elif [ -n "$CURRENT_TIMEZONE" ]; then
-    record_warn "Timezone will be changed from $CURRENT_TIMEZONE to $TIMEZONE."
+    if [ "$SOFTWARE_STATE" = "COMPLETE" ]; then
+        record_fail "Timezone must already match for database-only mode: current=$CURRENT_TIMEZONE expected=$TIMEZONE"
+    else
+        record_warn "Timezone will be changed from $CURRENT_TIMEZONE to $TIMEZONE."
+    fi
 else
     record_fail "Cannot determine the current timezone."
 fi
@@ -510,7 +642,9 @@ if id "$ORACLE_OWNER" >/dev/null 2>&1; then
     ORACLE_USER_EXISTS=1
     record_pass "Oracle owner exists: $ORACLE_OWNER"
 else
-    if [ "$PACKAGE_INSTALLED" -eq 1 ]; then
+    if [ "$SOFTWARE_STATE" = "COMPLETE" ]; then
+        record_fail "Oracle owner is missing for database-only mode: $ORACLE_OWNER"
+    elif [ "$PACKAGE_INSTALLED" -eq 1 ]; then
         record_fail "Oracle owner is missing although the preinstall package is installed: $ORACLE_OWNER"
     else
         record_warn "Oracle owner will be created by the preinstall package: $ORACLE_OWNER"
@@ -520,6 +654,8 @@ fi
 for GROUP_NAME in "$ORACLE_GROUP" dba; do
     if getent group "$GROUP_NAME" >/dev/null 2>&1; then
         record_pass "Required group exists: $GROUP_NAME"
+    elif [ "$SOFTWARE_STATE" = "COMPLETE" ]; then
+        record_fail "Required group is missing for database-only mode: $GROUP_NAME"
     elif [ "$PACKAGE_INSTALLED" -eq 1 ]; then
         record_fail "Required group is missing: $GROUP_NAME"
     else
@@ -539,42 +675,56 @@ else
     record_warn "Oracle Inventory will be created: $ORA_INVENTORY"
 fi
 
-record_pass "Oracle Software is not installed in the target Oracle Home."
+if [ "$SOFTWARE_STATE" = "COMPLETE" ]; then
+    record_pass "Project-managed Oracle Software is complete: $ORACLE_HOME"
+    record_pass "Inventory and all Software completion markers are consistent."
+else
+    record_pass "Oracle Software is not installed in the target Oracle Home."
+fi
 
 echo ""
 echo "--- Oracle Home filesystem capacity ---"
 
-# Walk upward to the nearest existing path so a new ORACLE_HOME can still be
-# checked against the filesystem that will contain it.
-ORACLE_HOME_CHECK_PATH="$ORACLE_HOME"
-while [ ! -e "$ORACLE_HOME_CHECK_PATH" ]; do
-    PARENT_PATH="$(dirname "$ORACLE_HOME_CHECK_PATH")"
-    if [ "$PARENT_PATH" = "$ORACLE_HOME_CHECK_PATH" ]; then
-        break
-    fi
-    ORACLE_HOME_CHECK_PATH="$PARENT_PATH"
-done
+if [ "$SOFTWARE_STATE" = "NEW" ]; then
+    # Walk upward to the nearest existing path so a new ORACLE_HOME can still be
+    # checked against the filesystem that will contain it.
+    ORACLE_HOME_CHECK_PATH="$ORACLE_HOME"
+    while [ ! -e "$ORACLE_HOME_CHECK_PATH" ]; do
+        PARENT_PATH="$(dirname "$ORACLE_HOME_CHECK_PATH")"
+        if [ "$PARENT_PATH" = "$ORACLE_HOME_CHECK_PATH" ]; then
+            break
+        fi
+        ORACLE_HOME_CHECK_PATH="$PARENT_PATH"
+    done
 
-ORACLE_HOME_AVAILABLE_MB="$(df -Pm "$ORACLE_HOME_CHECK_PATH" 2>/dev/null | awk 'NR == 2 {print $4}')"
-if [[ "$ORACLE_HOME_AVAILABLE_MB" =~ ^[0-9]+$ ]]; then
-    echo "INFO: Oracle Home filesystem available space is $ORACLE_HOME_AVAILABLE_MB MB."
-    echo "INFO: Filesystem check path: $ORACLE_HOME_CHECK_PATH"
-    if [ "$ORACLE_HOME_AVAILABLE_MB" -lt "$ORACLE_SOFTWARE_MINIMUM_MB" ]; then
-        record_fail "Oracle Home filesystem must have at least 7.2 GB available before extraction."
-    elif [ "$ORACLE_HOME_AVAILABLE_MB" -lt "$ORACLE_SOFTWARE_RECOMMENDED_MB" ]; then
-        record_warn "Oracle Home filesystem has less than the recommended 100 GB of available space."
+    ORACLE_HOME_AVAILABLE_MB="$(df -Pm "$ORACLE_HOME_CHECK_PATH" 2>/dev/null | awk 'NR == 2 {print $4}')"
+    if [[ "$ORACLE_HOME_AVAILABLE_MB" =~ ^[0-9]+$ ]]; then
+        echo "INFO: Oracle Home filesystem available space is $ORACLE_HOME_AVAILABLE_MB MB."
+        echo "INFO: Filesystem check path: $ORACLE_HOME_CHECK_PATH"
+        if [ "$ORACLE_HOME_AVAILABLE_MB" -lt "$ORACLE_SOFTWARE_MINIMUM_MB" ]; then
+            record_fail "Oracle Home filesystem must have at least 7.2 GB available before extraction."
+        elif [ "$ORACLE_HOME_AVAILABLE_MB" -lt "$ORACLE_SOFTWARE_RECOMMENDED_MB" ]; then
+            record_warn "Oracle Home filesystem has less than the recommended 100 GB of available space."
+        else
+            record_pass "Oracle Home filesystem has at least 100 GB of available space."
+        fi
     else
-        record_pass "Oracle Home filesystem has at least 100 GB of available space."
+        record_fail "Cannot determine available space for Oracle Home: $ORACLE_HOME"
     fi
 else
-    record_fail "Cannot determine available space for Oracle Home: $ORACLE_HOME"
+    record_pass "Oracle Home filesystem capacity check is not required for database-only mode."
 fi
 
 for ORACLE_DIR in "$SOFTWARE_SOURCE_DIR" "$ORACLE_BASE" "$ORACLE_HOME" "$ORA_INVENTORY"; do
+    if [ "$SOFTWARE_STATE" = "COMPLETE" ] && [ "$ORACLE_DIR" = "$SOFTWARE_SOURCE_DIR" ]; then
+        continue
+    fi
     if [ -e "$ORACLE_DIR" ] && [ ! -d "$ORACLE_DIR" ]; then
         record_fail "Path exists but is not a directory: $ORACLE_DIR"
     elif [ -d "$ORACLE_DIR" ]; then
         record_pass "Directory exists: $ORACLE_DIR"
+    elif [ "$SOFTWARE_STATE" = "COMPLETE" ]; then
+        record_fail "Required database-only directory is missing: $ORACLE_DIR"
     elif [ "$ORACLE_DIR" = "$ORA_INVENTORY" ] && [ "$INVENTORY_DECLARED" -eq 1 ]; then
         record_fail "oraInst.loc points to a missing Inventory directory: $ORA_INVENTORY"
     else
@@ -603,13 +753,19 @@ if [ -d "$ORA_INVENTORY" ]; then
 fi
 
 if [ -d "$ORACLE_HOME" ]; then
-    record_pass "Oracle Home is empty and ready for extraction."
+    if [ "$SOFTWARE_STATE" = "COMPLETE" ]; then
+        record_pass "Oracle Home contains the verified Oracle Software installation."
+    else
+        record_pass "Oracle Home is empty and ready for extraction."
+    fi
 fi
 
-if [ -f "$SOFTWARE_SOURCE_DIR/$ZIP_FILE" ]; then
-    record_pass "Oracle Database 19c ZIP is available: $SOFTWARE_SOURCE_DIR/$ZIP_FILE"
-else
-    record_fail "Oracle Database 19c ZIP is missing: $SOFTWARE_SOURCE_DIR/$ZIP_FILE"
+if [ "$SOFTWARE_STATE" = "NEW" ]; then
+    if [ -f "$SOFTWARE_SOURCE_DIR/$ZIP_FILE" ]; then
+        record_pass "Oracle Database 19c ZIP is available: $SOFTWARE_SOURCE_DIR/$ZIP_FILE"
+    else
+        record_fail "Oracle Database 19c ZIP is missing: $SOFTWARE_SOURCE_DIR/$ZIP_FILE"
+    fi
 fi
 
 if [ "$ORACLE_USER_EXISTS" -eq 1 ]; then
@@ -805,5 +961,5 @@ if [ "$FAIL_COUNT" -gt 0 ]; then
 fi
 
 echo "PRECHECK RESULT: PASS"
-echo "Warnings may be handled by the installation script."
+echo "Warnings require DBA review but do not block the selected supported mode."
 exit 0
