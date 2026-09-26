@@ -39,7 +39,7 @@ Oracle Linux 7 → FAIL
 其他 Linux    → FAIL
 ```
 
-PreCheck 與 Main Script 必須在修改系統、建立目錄、修改 Profile、安裝套件或啟動 Oracle Installer 前確認目前主機為 Oracle Linux 8。
+PreCheck 必須在修改系統、建立目錄、修改 Profile、安裝套件或啟動 Oracle Installer 前確認目前主機為 Oracle Linux 8。
 
 如果目前主機不是 Oracle Linux 8，必須顯示實際偵測到的 OS 與 Version，然後 `exit 1`。不得只顯示 warning 後繼續，也不得加入 Oracle Linux 7、RHEL、Rocky Linux、AlmaLinux、CentOS 或其他 distribution 的相容處理。
 

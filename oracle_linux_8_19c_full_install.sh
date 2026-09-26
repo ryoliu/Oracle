@@ -231,18 +231,9 @@ fi
 echo ""
 echo "=== 1. Set Oracle Installer Compatibility ==="
 
-. /etc/os-release
-if [ "$ID" != "ol" ] || [ "${VERSION_ID%%.*}" != "8" ]; then
-    echo "ERROR: Supported operating system is Oracle Linux 8: ${ID:-unknown} ${VERSION_ID:-unknown}"
-    exit 1
-fi
-
-INSTALLER_DISTID=""
+INSTALLER_DISTID="OL7"
 # The 19.3 base installer uses the OL7 compatibility identifier on OL8.
 # This changes Installer platform detection only; it does not change the OS.
-if [ "$ID" = "ol" ] && [ "${VERSION_ID%%.*}" = "8" ]; then
-    INSTALLER_DISTID="OL7"
-fi
 
 # Collect deployment input only after the general PreCheck confirms that the
 # target Oracle Software is not installed and the new-install state is usable.
@@ -874,17 +865,15 @@ fi
 # Activation is limited to the documented OL8 compat-libcap1 condition associated
 # with Bug 29772579. The OUI option itself can ignore all prerequisite failures.
 BUG_29772579_OPTION=""
-if [ "$ID" = "ol" ] && [ "${VERSION_ID%%.*}" = "8" ]; then
-    if rpm -q compat-libcap1 >/dev/null 2>&1; then
-        echo "compat-libcap1 is installed. Oracle Bug 29772579 workaround is not required."
-    else
-        BUG_29772579_OPTION="-ignorePrereqFailure"
-        echo "Oracle Bug 29772579 condition detected on Oracle Linux 8."
-        echo "compat-libcap1 is not installed; enable the documented prerequisite workaround."
-        echo "WARNING: -ignorePrereqFailure causes OUI to ignore all prerequisite failures."
-        echo "Project PreCheck passed, but it does not replace all OUI prerequisite checks."
-        echo "Review the Oracle installer log for every ignored prerequisite result."
-    fi
+if rpm -q compat-libcap1 >/dev/null 2>&1; then
+    echo "compat-libcap1 is installed. Oracle Bug 29772579 workaround is not required."
+else
+    BUG_29772579_OPTION="-ignorePrereqFailure"
+    echo "Oracle Bug 29772579 condition detected on Oracle Linux 8."
+    echo "compat-libcap1 is not installed; enable the documented prerequisite workaround."
+    echo "WARNING: -ignorePrereqFailure causes OUI to ignore all prerequisite failures."
+    echo "Project PreCheck passed, but it does not replace all OUI prerequisite checks."
+    echo "Review the Oracle installer log for every ignored prerequisite result."
 fi
 
 # Run Oracle Universal Installer as the software owner. Exit code 6 means the
