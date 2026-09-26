@@ -32,7 +32,7 @@ if ! SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; then
     exit 1
 fi
 CONFIG_FILE="$SCRIPT_DIR/oracle_install.conf"
-PRECHECK_SCRIPT="$SCRIPT_DIR/oracle_linux_7_8_19c_precheck.sh"
+PRECHECK_SCRIPT="$SCRIPT_DIR/oracle_linux_8_19c_precheck.sh"
 
 if [ -L "$CONFIG_FILE" ] || [ ! -f "$CONFIG_FILE" ]; then
     echo "ERROR: Configuration must be a regular file: $CONFIG_FILE"
@@ -1404,7 +1404,7 @@ ORACLE_DATABASE_SCRIPT
     # PostCheck is a separate read-only gate. Credential files are retained
     # until Easy Connect verification finishes, then removed immediately.
     CURRENT_STAGE="post-install health check"
-    POSTCHECK_SCRIPT="$SCRIPT_DIR/oracle_linux_7_8_19c_postcheck.sh"
+    POSTCHECK_SCRIPT="$SCRIPT_DIR/oracle_linux_8_19c_postcheck.sh"
     if [ -L "$POSTCHECK_SCRIPT" ] || [ ! -f "$POSTCHECK_SCRIPT" ]; then
         echo "ERROR: PostCheck must be a regular file: $POSTCHECK_SCRIPT"
         exit 1
