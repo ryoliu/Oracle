@@ -326,7 +326,9 @@ fi
 
 if [ "$TARGET_ONLY" -eq 1 ]; then
     if [ -z "${ORACLE_BASE:-}" ] || [ -z "${ORACLE_OWNER:-}" ] ||
-       [ -z "${DATA_DIR:-}" ] || [ -z "${FRA_DIR:-}" ]; then
+       [ -z "${DATA_DIR:-}" ] || [ -z "${FRA_DIR:-}" ] ||
+       [ -z "${TOTAL_MEMORY_MB:-}" ] || [ -z "${FRA_SIZE_MB:-}" ] ||
+       [ -z "${CHARACTER_SET:-}" ] || [ -z "${NATIONAL_CHARACTER_SET:-}" ]; then
         echo "FAIL: Database target settings are missing from: $CONFIG_FILE"
         echo "PRECHECK RESULT: FAIL"
         exit 1
@@ -348,7 +350,8 @@ else
        [ -z "${SELINUX_CONFIG:-}" ] || [ -z "${TIMEZONE:-}" ] ||
        [ -z "${SOFTWARE_SOURCE_DIR:-}" ] || [ -z "${ZIP_FILE:-}" ] ||
        [ -z "${ORACLE_BASE:-}" ] || [ -z "${ORACLE_OWNER:-}" ] ||
-       [ -z "${ORACLE_GROUP:-}" ] || [ -z "${DATA_DIR:-}" ]; then
+       [ -z "${ORACLE_GROUP:-}" ] || [ -z "${LOCAL_BIN_DIR:-}" ] ||
+       [ -z "${DATA_DIR:-}" ]; then
         echo "FAIL: Required settings are missing from: $CONFIG_FILE"
         echo "PRECHECK RESULT: FAIL"
         exit 1

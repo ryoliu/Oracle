@@ -223,33 +223,6 @@ if [ "$DB_ONLY" -eq 1 ] && [ "$PASSWORD_RESET_REQUESTED" -eq 1 ]; then
     exit 1
 fi
 
-if [ "$DB_ONLY" -eq 1 ]; then
-    if [ -z "${ORACLE_BASE:-}" ] || [ -z "${ORACLE_OWNER:-}" ] ||
-       [ -z "${ORACLE_GROUP:-}" ] || [ -z "${DATA_DIR:-}" ]; then
-        echo "ERROR: Database-only base settings are missing from: $CONFIG_FILE"
-        exit 1
-    fi
-else
-    if [ -z "${PACKAGE_NAME:-}" ] || [ -z "${LIMITS_FILE:-}" ] ||
-       [ -z "${SELINUX_CONFIG:-}" ] || [ -z "${TIMEZONE:-}" ] ||
-       [ -z "${SOFTWARE_SOURCE_DIR:-}" ] || [ -z "${ZIP_FILE:-}" ] ||
-       [ -z "${ORACLE_BASE:-}" ] || [ -z "${ORACLE_OWNER:-}" ] ||
-       [ -z "${ORACLE_GROUP:-}" ] || [ -z "${LOCAL_BIN_DIR:-}" ] ||
-       [ -z "${DATA_DIR:-}" ]; then
-        echo "ERROR: Base installation settings are missing from: $CONFIG_FILE"
-        exit 1
-    fi
-fi
-
-if [ "$CREATE_DB" -eq 1 ]; then
-    if [ -z "${FRA_DIR:-}" ] || [ -z "${TOTAL_MEMORY_MB:-}" ] ||
-       [ -z "${FRA_SIZE_MB:-}" ] || [ -z "${CHARACTER_SET:-}" ] ||
-       [ -z "${NATIONAL_CHARACTER_SET:-}" ]; then
-        echo "ERROR: Database creation settings are missing from: $CONFIG_FILE"
-        exit 1
-    fi
-fi
-
 DB_HOST="$(hostname -f 2>/dev/null)"
 
 require_command runuser
@@ -463,7 +436,7 @@ if ! sysctl --system; then
 fi
 
 echo ""
-echo "=== 4. Read Current Kernel Parameters ==="
+echo "=== 4. Display Current Kernel Parameters ==="
 
 for KERNEL_PARAMETER in \
     fs.aio-max-nr \
@@ -479,7 +452,7 @@ do
     fi
 done
 
-echo "Kernel parameter verification completed successfully."
+echo "Kernel parameters were displayed successfully."
 
 echo ""
 echo "=== 5. Check Oracle User, Groups, and Directories ==="
@@ -612,7 +585,7 @@ if ! grep -Ev '^[[:space:]]*(#|$)' "$LIMITS_FILE"; then
 fi
 
 echo ""
-echo "=== 7. Verify Oracle User Current Limits ==="
+echo "=== 7. Display Oracle User Current Limits ==="
 
 show_oracle_limit "Open files soft limit" -Sn
 show_oracle_limit "Open files hard limit" -Hn
@@ -623,7 +596,7 @@ show_oracle_limit "Stack hard limit" -Hs
 show_oracle_limit "Locked memory soft limit" -Sl
 show_oracle_limit "Locked memory hard limit" -Hl
 
-echo "Oracle user limit verification completed successfully."
+echo "Oracle user current limits were displayed successfully."
 
 echo ""
 echo "=== 8. Disable SELinux ==="
@@ -673,14 +646,14 @@ else
     echo "SELinux is not enforcing."
 fi
 
-echo ""
-echo "=== 9. Disable firewalld ==="
-
 if ! CURRENT_SELINUX="$(getenforce)" ||
    { [ "$CURRENT_SELINUX" != "Permissive" ] && [ "$CURRENT_SELINUX" != "Disabled" ]; }; then
     echo "ERROR: Current SELinux status verification failed."
     exit 1
 fi
+
+echo ""
+echo "=== 9. Disable firewalld ==="
 
 if ! SERVICE_UNITS="$(systemctl list-unit-files --no-pager)"; then
     echo "ERROR: Failed to retrieve the service list."
@@ -1452,10 +1425,15 @@ ORACLE_DATABASE_SCRIPT
         exit 1
     fi
     if ! runuser -u "$ORACLE_OWNER" -- env \
-        ORACLE_BASE="$ORACLE_BASE" ORACLE_HOME="$ORACLE_HOME" ORACLE_SID="$ORACLE_SID" \
-        TNS_ADMIN="$ORACLE_HOME/network/admin" LD_LIBRARY_PATH="$ORACLE_HOME/lib" \
-        bash "$POSTCHECK_SCRIPT" "$ORACLE_SID" "$LISTENER_PORT" \
-        "$DB_HOST" "$DB_SERVICE" "$DB_SECRET_DIR"; then
+        ORACLE_BASE="$ORACLE_BASE" \
+        ORACLE_HOME="$ORACLE_HOME" \
+        ORACLE_SID="$ORACLE_SID" \
+        TNS_ADMIN="$ORACLE_HOME/network/admin" \
+        LD_LIBRARY_PATH="$ORACLE_HOME/lib" \
+        bash -s -- \
+        "$ORACLE_SID" "$LISTENER_PORT" \
+        "$DB_HOST" "$DB_SERVICE" "$DB_SECRET_DIR" \
+        < "$POSTCHECK_SCRIPT"; then
         echo "ERROR: Oracle Database PostCheck failed."
         exit 1
     fi
