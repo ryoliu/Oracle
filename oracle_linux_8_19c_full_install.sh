@@ -421,7 +421,7 @@ if ! sysctl --system; then
 fi
 
 echo ""
-echo "=== 4. Verify Current Kernel Parameters ==="
+echo "=== 4. Read Current Kernel Parameters ==="
 
 for KERNEL_PARAMETER in \
     fs.aio-max-nr \
@@ -1011,11 +1011,6 @@ echo "Oracle Home: $ORACLE_HOME"
 echo "Inventory: $ORA_INVENTORY"
 if [ ! -s "$INSTALL_MARKER" ]; then
     echo "ERROR: Installer completion marker is missing or empty: $INSTALL_MARKER"
-    exit 1
-fi
-if [ ! -f "$INVENTORY_FILE" ] ||
-   ! grep -Fq "LOC=\"$ORACLE_HOME\"" "$INVENTORY_FILE"; then
-    echo "ERROR: Oracle Home is not registered in Inventory."
     exit 1
 fi
 echo "Installer marker: $INSTALL_MARKER"

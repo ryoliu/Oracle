@@ -47,6 +47,23 @@ PASS_COUNT=0
 WARN_COUNT=0
 FAIL_COUNT=0
 
+# These helpers record accumulated checks. Software hard-gate failures still
+# print their result and exit immediately without using these functions.
+record_pass() {
+    echo "PASS: $1"
+    PASS_COUNT=$((PASS_COUNT + 1))
+}
+
+record_warn() {
+    echo "WARN: $1"
+    WARN_COUNT=$((WARN_COUNT + 1))
+}
+
+record_fail() {
+    echo "FAIL: $1"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+}
+
 OS_MAJOR=""
 PACKAGE_INSTALLED=0
 ORACLE_USER_EXISTS=0
@@ -253,11 +270,9 @@ echo "=== Identity and platform ==="
 # These checks identify conditions Main cannot safely correct during an Oracle
 # installation, such as the wrong OS family, architecture, or hostname.
 if [ "$(id -u)" -eq 0 ]; then
-    echo "PASS: Running as root."
-    PASS_COUNT=$((PASS_COUNT + 1))
+    record_pass "Running as root."
 else
-    echo "FAIL: Run this precheck as root."
-    FAIL_COUNT=$((FAIL_COUNT + 1))
+    record_fail "Run this precheck as root."
 fi
 
 if [ -r /etc/os-release ]; then
@@ -265,42 +280,33 @@ if [ -r /etc/os-release ]; then
     OS_MAJOR="${VERSION_ID%%.*}"
     case "$ID:$OS_MAJOR" in
         ol:8)
-            echo "PASS: Supported operating system detected: $ID $VERSION_ID"
-            PASS_COUNT=$((PASS_COUNT + 1))
+            record_pass "Supported operating system detected: $ID $VERSION_ID"
             ;;
         *)
-            echo "FAIL: Supported operating system is Oracle Linux 8: ${ID:-unknown} ${VERSION_ID:-unknown}"
-            FAIL_COUNT=$((FAIL_COUNT + 1))
+            record_fail "Supported operating system is Oracle Linux 8: ${ID:-unknown} ${VERSION_ID:-unknown}"
             ;;
     esac
 else
-    echo "FAIL: Cannot read /etc/os-release."
-    FAIL_COUNT=$((FAIL_COUNT + 1))
+    record_fail "Cannot read /etc/os-release."
 fi
 
 if [ "$(uname -m)" = "x86_64" ]; then
-    echo "PASS: Architecture is x86_64."
-    PASS_COUNT=$((PASS_COUNT + 1))
+    record_pass "Architecture is x86_64."
 else
-    echo "FAIL: Oracle Database 19c media in this project requires x86_64: $(uname -m)"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
+    record_fail "Oracle Database 19c media in this project requires x86_64: $(uname -m)"
 fi
 
 if [ -n "$DB_HOST" ] && [[ "$DB_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]]; then
-    echo "PASS: Hostname is available: $DB_HOST"
-    PASS_COUNT=$((PASS_COUNT + 1))
+    record_pass "Hostname is available: $DB_HOST"
 else
-    echo "FAIL: A valid hostname or FQDN is required."
-    FAIL_COUNT=$((FAIL_COUNT + 1))
+    record_fail "A valid hostname or FQDN is required."
 fi
 
 for REQUIRED_COMMAND in awk df dirname find getenforce getent grep hostname id rpm runuser sed stat sysctl systemctl timedatectl tr uname; do
     if command -v "$REQUIRED_COMMAND" >/dev/null 2>&1; then
-        echo "PASS: Required command is available: $REQUIRED_COMMAND"
-        PASS_COUNT=$((PASS_COUNT + 1))
+        record_pass "Required command is available: $REQUIRED_COMMAND"
     else
-        echo "FAIL: Required command is missing: $REQUIRED_COMMAND"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
+        record_fail "Required command is missing: $REQUIRED_COMMAND"
     fi
 done
 
@@ -312,8 +318,7 @@ MINIMUM_KERNEL=""
 KERNEL_RU_NOTE=""
 
 if ! KERNEL_RELEASE="$(uname -r 2>/dev/null)" || [ -z "$KERNEL_RELEASE" ]; then
-    echo "FAIL: Unable to determine the running kernel release with uname -r."
-    FAIL_COUNT=$((FAIL_COUNT + 1))
+    record_fail "Unable to determine the running kernel release with uname -r."
 else
     echo "Running kernel: $KERNEL_RELEASE"
 
@@ -340,25 +345,20 @@ else
     esac
 
     if [ -z "$MINIMUM_KERNEL" ]; then
-        echo "WARN: Kernel family is not recognized for Oracle Linux ${OS_MAJOR:-unknown}: $KERNEL_RELEASE"
+        record_warn "Kernel family is not recognized for Oracle Linux ${OS_MAJOR:-unknown}: $KERNEL_RELEASE"
         echo "WARN: Verify this kernel and Oracle Database 19c combination in Oracle Certification."
-        WARN_COUNT=$((WARN_COUNT + 1))
     elif ! command -v sort >/dev/null 2>&1; then
-        echo "FAIL: Required command is missing for kernel comparison: sort"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
+        record_fail "Required command is missing for kernel comparison: sort"
     elif printf '%s\n%s\n' "$MINIMUM_KERNEL" "$KERNEL_RELEASE" | LC_ALL=C sort -V -C; then
-        echo "PASS: Running kernel meets the documented minimum for $KERNEL_FAMILY: $KERNEL_RELEASE"
+        record_pass "Running kernel meets the documented minimum for $KERNEL_FAMILY: $KERNEL_RELEASE"
         echo "INFO: This checks the kernel minimum only; full certification is not verified."
-        PASS_COUNT=$((PASS_COUNT + 1))
         if [ -n "$KERNEL_RU_NOTE" ]; then
-            echo "WARN: $KERNEL_RU_NOTE"
+            record_warn "$KERNEL_RU_NOTE"
             echo "WARN: Continuing for 19.3 Base Media testing only; this is not a certified production combination."
-            WARN_COUNT=$((WARN_COUNT + 1))
         fi
     else
-        echo "FAIL: Running kernel is below the documented minimum for $KERNEL_FAMILY: $KERNEL_RELEASE"
+        record_fail "Running kernel is below the documented minimum for $KERNEL_FAMILY: $KERNEL_RELEASE"
         echo "FAIL: Minimum kernel: $MINIMUM_KERNEL"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
     fi
 fi
 # End running kernel check.
@@ -370,66 +370,50 @@ echo "=== Package and operating system settings ==="
 # because Main owns the package installation step on a new server.
 if rpm -q "$PACKAGE_NAME" >/dev/null 2>&1; then
     PACKAGE_INSTALLED=1
-    echo "PASS: Package is installed: $PACKAGE_NAME"
-    PASS_COUNT=$((PASS_COUNT + 1))
+    record_pass "Package is installed: $PACKAGE_NAME"
 else
     if ! command -v yum >/dev/null 2>&1; then
-        echo "FAIL: Package is not installed and yum is unavailable: $PACKAGE_NAME"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
+        record_fail "Package is not installed and yum is unavailable: $PACKAGE_NAME"
     elif yum -q list available "$PACKAGE_NAME" >/dev/null 2>&1; then
-        echo "WARN: Package is available and will be installed: $PACKAGE_NAME"
-        WARN_COUNT=$((WARN_COUNT + 1))
+        record_warn "Package is available and will be installed: $PACKAGE_NAME"
     else
-        echo "FAIL: Package is not installed or available from enabled repositories: $PACKAGE_NAME"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
+        record_fail "Package is not installed or available from enabled repositories: $PACKAGE_NAME"
     fi
 fi
 
 if [ -r "$PREINSTALL_SYSCTL" ]; then
-    echo "PASS: Preinstall sysctl file is readable: $PREINSTALL_SYSCTL"
-    PASS_COUNT=$((PASS_COUNT + 1))
+    record_pass "Preinstall sysctl file is readable: $PREINSTALL_SYSCTL"
 elif [ "$PACKAGE_INSTALLED" -eq 1 ]; then
-    echo "FAIL: Installed preinstall package is missing its sysctl file: $PREINSTALL_SYSCTL"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
+    record_fail "Installed preinstall package is missing its sysctl file: $PREINSTALL_SYSCTL"
 else
-    echo "WARN: Preinstall sysctl file will be provided by the package: $PREINSTALL_SYSCTL"
-    WARN_COUNT=$((WARN_COUNT + 1))
+    record_warn "Preinstall sysctl file will be provided by the package: $PREINSTALL_SYSCTL"
 fi
 
 if [ -e "$CUSTOM_SYSCTL" ] && [ ! -r "$CUSTOM_SYSCTL" ]; then
-    echo "FAIL: Custom sysctl file is not readable: $CUSTOM_SYSCTL"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
+    record_fail "Custom sysctl file is not readable: $CUSTOM_SYSCTL"
 elif [ -r "$CUSTOM_SYSCTL" ]; then
-    echo "PASS: Custom sysctl file is readable: $CUSTOM_SYSCTL"
-    PASS_COUNT=$((PASS_COUNT + 1))
+    record_pass "Custom sysctl file is readable: $CUSTOM_SYSCTL"
 else
-    echo "PASS: No custom Oracle sysctl file is configured."
-    PASS_COUNT=$((PASS_COUNT + 1))
+    record_pass "No custom Oracle sysctl file is configured."
 fi
 
 if [ -r "$LIMITS_FILE" ]; then
-    echo "PASS: Oracle limits file is readable: $LIMITS_FILE"
-    PASS_COUNT=$((PASS_COUNT + 1))
+    record_pass "Oracle limits file is readable: $LIMITS_FILE"
 elif [ "$PACKAGE_INSTALLED" -eq 1 ]; then
-    echo "FAIL: Installed preinstall package is missing its limits file: $LIMITS_FILE"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
+    record_fail "Installed preinstall package is missing its limits file: $LIMITS_FILE"
 else
-    echo "WARN: Oracle limits file will be provided by the package: $LIMITS_FILE"
-    WARN_COUNT=$((WARN_COUNT + 1))
+    record_warn "Oracle limits file will be provided by the package: $LIMITS_FILE"
 fi
 
 if [ -r "$SELINUX_CONFIG" ]; then
     CURRENT_SELINUX="$(getenforce 2>/dev/null)"
     if [ "$CURRENT_SELINUX" = "Disabled" ]; then
-        echo "PASS: SELinux is disabled."
-        PASS_COUNT=$((PASS_COUNT + 1))
+        record_pass "SELinux is disabled."
     else
-        echo "WARN: SELinux is ${CURRENT_SELINUX:-unknown}; the installer will configure it as disabled."
-        WARN_COUNT=$((WARN_COUNT + 1))
+        record_warn "SELinux is ${CURRENT_SELINUX:-unknown}; the installer will configure it as disabled."
     fi
 else
-    echo "FAIL: SELinux configuration file is not readable: $SELINUX_CONFIG"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
+    record_fail "SELinux configuration file is not readable: $SELINUX_CONFIG"
 fi
 
 for SERVICE_NAME in firewalld iptables; do
@@ -438,15 +422,12 @@ for SERVICE_NAME in firewalld iptables; do
         SERVICE_ENABLED="$(systemctl is-enabled "$SERVICE_NAME" 2>/dev/null)"
         if [ "$SERVICE_ACTIVE" = "inactive" ] &&
            { [ "$SERVICE_ENABLED" = "disabled" ] || [ "$SERVICE_ENABLED" = "masked" ]; }; then
-            echo "PASS: $SERVICE_NAME is inactive and not enabled."
-            PASS_COUNT=$((PASS_COUNT + 1))
+            record_pass "$SERVICE_NAME is inactive and not enabled."
         else
-            echo "WARN: $SERVICE_NAME will be stopped and disabled; active=$SERVICE_ACTIVE enabled=$SERVICE_ENABLED"
-            WARN_COUNT=$((WARN_COUNT + 1))
+            record_warn "$SERVICE_NAME will be stopped and disabled; active=$SERVICE_ACTIVE enabled=$SERVICE_ENABLED"
         fi
     else
-        echo "PASS: Service is not installed: $SERVICE_NAME"
-        PASS_COUNT=$((PASS_COUNT + 1))
+        record_pass "Service is not installed: $SERVICE_NAME"
     fi
 done
 
@@ -460,14 +441,11 @@ CURRENT_TIMEZONE="$(LC_ALL=C timedatectl 2>/dev/null | awk -F: '
     }
 ')"
 if [ "$CURRENT_TIMEZONE" = "$TIMEZONE" ]; then
-    echo "PASS: Timezone is configured: $TIMEZONE"
-    PASS_COUNT=$((PASS_COUNT + 1))
+    record_pass "Timezone is configured: $TIMEZONE"
 elif [ -n "$CURRENT_TIMEZONE" ]; then
-    echo "WARN: Timezone will be changed from $CURRENT_TIMEZONE to $TIMEZONE."
-    WARN_COUNT=$((WARN_COUNT + 1))
+    record_warn "Timezone will be changed from $CURRENT_TIMEZONE to $TIMEZONE."
 else
-    echo "FAIL: Cannot determine the current timezone."
-    FAIL_COUNT=$((FAIL_COUNT + 1))
+    record_fail "Cannot determine the current timezone."
 fi
 
 echo ""
@@ -478,30 +456,24 @@ echo "=== Memory and filesystem resources ==="
 if MEM_KB="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)" &&
    SWAP_KB="$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo)" &&
    [ -n "$MEM_KB" ] && [ -n "$SWAP_KB" ]; then
-    echo "PASS: Memory is $((MEM_KB / 1024)) MB; Swap is $((SWAP_KB / 1024)) MB."
-    PASS_COUNT=$((PASS_COUNT + 1))
+    record_pass "Memory is $((MEM_KB / 1024)) MB; Swap is $((SWAP_KB / 1024)) MB."
     if [ "$MEM_KB" -lt 2097152 ]; then
-        echo "FAIL: At least 2 GB of RAM is required."
-        FAIL_COUNT=$((FAIL_COUNT + 1))
+        record_fail "At least 2 GB of RAM is required."
     else
-        echo "PASS: Minimum memory requirement is satisfied."
-        PASS_COUNT=$((PASS_COUNT + 1))
+        record_pass "Minimum memory requirement is satisfied."
         if [ "$MEM_KB" -le 16777216 ]; then
             REQUIRED_SWAP_KB=$MEM_KB
         else
             REQUIRED_SWAP_KB=16777216
         fi
         if [ "$SWAP_KB" -ge "$REQUIRED_SWAP_KB" ]; then
-            echo "PASS: Swap requirement is satisfied."
-            PASS_COUNT=$((PASS_COUNT + 1))
+            record_pass "Swap requirement is satisfied."
         else
-            echo "FAIL: Swap must be at least $(((REQUIRED_SWAP_KB + 1023) / 1024)) MB."
-            FAIL_COUNT=$((FAIL_COUNT + 1))
+            record_fail "Swap must be at least $(((REQUIRED_SWAP_KB + 1023) / 1024)) MB."
         fi
     fi
 else
-    echo "FAIL: Cannot read memory and Swap information."
-    FAIL_COUNT=$((FAIL_COUNT + 1))
+    record_fail "Cannot read memory and Swap information."
 fi
 
 echo ""
@@ -509,8 +481,7 @@ echo "Transparent HugePages status:"
 if [ -r /sys/kernel/mm/transparent_hugepage/enabled ]; then
     cat /sys/kernel/mm/transparent_hugepage/enabled
 else
-    echo "WARN: Transparent HugePages status file was not found."
-    WARN_COUNT=$((WARN_COUNT + 1))
+    record_warn "Transparent HugePages status file was not found."
 fi
 
 if [ -d /tmp ]; then
@@ -518,53 +489,41 @@ if [ -d /tmp ]; then
     if [[ "$TMP_AVAILABLE_MB" =~ ^[0-9]+$ ]]; then
         echo "INFO: /tmp available space is $TMP_AVAILABLE_MB MB."
         if [ "$TMP_AVAILABLE_MB" -ge "$TMP_MINIMUM_MB" ]; then
-            echo "PASS: /tmp has at least 1 GB of available space."
-            PASS_COUNT=$((PASS_COUNT + 1))
+            record_pass "/tmp has at least 1 GB of available space."
         else
-            echo "FAIL: /tmp must have at least 1 GB of available space."
-            FAIL_COUNT=$((FAIL_COUNT + 1))
+            record_fail "/tmp must have at least 1 GB of available space."
         fi
     else
-        echo "FAIL: Cannot determine available space for /tmp."
-        FAIL_COUNT=$((FAIL_COUNT + 1))
+        record_fail "Cannot determine available space for /tmp."
     fi
 else
-    echo "FAIL: Filesystem path is unavailable: /tmp"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
+    record_fail "Filesystem path is unavailable: /tmp"
 fi
 
 if [ -d /dev/shm ] && df -Pk /dev/shm >/dev/null 2>&1; then
-    echo "PASS: Filesystem is available: /dev/shm"
-    PASS_COUNT=$((PASS_COUNT + 1))
+    record_pass "Filesystem is available: /dev/shm"
 else
-    echo "FAIL: Filesystem is unavailable: /dev/shm"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
+    record_fail "Filesystem is unavailable: /dev/shm"
 fi
 
 if id "$ORACLE_OWNER" >/dev/null 2>&1; then
     ORACLE_USER_EXISTS=1
-    echo "PASS: Oracle owner exists: $ORACLE_OWNER"
-    PASS_COUNT=$((PASS_COUNT + 1))
+    record_pass "Oracle owner exists: $ORACLE_OWNER"
 else
     if [ "$PACKAGE_INSTALLED" -eq 1 ]; then
-        echo "FAIL: Oracle owner is missing although the preinstall package is installed: $ORACLE_OWNER"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
+        record_fail "Oracle owner is missing although the preinstall package is installed: $ORACLE_OWNER"
     else
-        echo "WARN: Oracle owner will be created by the preinstall package: $ORACLE_OWNER"
-        WARN_COUNT=$((WARN_COUNT + 1))
+        record_warn "Oracle owner will be created by the preinstall package: $ORACLE_OWNER"
     fi
 fi
 
 for GROUP_NAME in "$ORACLE_GROUP" dba; do
     if getent group "$GROUP_NAME" >/dev/null 2>&1; then
-        echo "PASS: Required group exists: $GROUP_NAME"
-        PASS_COUNT=$((PASS_COUNT + 1))
+        record_pass "Required group exists: $GROUP_NAME"
     elif [ "$PACKAGE_INSTALLED" -eq 1 ]; then
-        echo "FAIL: Required group is missing: $GROUP_NAME"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
+        record_fail "Required group is missing: $GROUP_NAME"
     else
-        echo "WARN: Group will be created by the preinstall package: $GROUP_NAME"
-        WARN_COUNT=$((WARN_COUNT + 1))
+        record_warn "Group will be created by the preinstall package: $GROUP_NAME"
     fi
 done
 
@@ -575,15 +534,12 @@ echo "=== Oracle installation state ==="
 # that the configured Inventory was previously declared.
 INVENTORY_GROUP="$ORACLE_GROUP"
 if [ "$INVENTORY_DECLARED" -eq 1 ]; then
-    echo "PASS: Existing Oracle Inventory is declared: $ORA_INVENTORY"
-    PASS_COUNT=$((PASS_COUNT + 1))
+    record_pass "Existing Oracle Inventory is declared: $ORA_INVENTORY"
 else
-    echo "WARN: Oracle Inventory will be created: $ORA_INVENTORY"
-    WARN_COUNT=$((WARN_COUNT + 1))
+    record_warn "Oracle Inventory will be created: $ORA_INVENTORY"
 fi
 
-echo "PASS: Oracle Software is not installed in the target Oracle Home."
-PASS_COUNT=$((PASS_COUNT + 1))
+record_pass "Oracle Software is not installed in the target Oracle Home."
 
 echo ""
 echo "--- Oracle Home filesystem capacity ---"
@@ -604,72 +560,56 @@ if [[ "$ORACLE_HOME_AVAILABLE_MB" =~ ^[0-9]+$ ]]; then
     echo "INFO: Oracle Home filesystem available space is $ORACLE_HOME_AVAILABLE_MB MB."
     echo "INFO: Filesystem check path: $ORACLE_HOME_CHECK_PATH"
     if [ "$ORACLE_HOME_AVAILABLE_MB" -lt "$ORACLE_SOFTWARE_MINIMUM_MB" ]; then
-        echo "FAIL: Oracle Home filesystem must have at least 7.2 GB available before extraction."
-        FAIL_COUNT=$((FAIL_COUNT + 1))
+        record_fail "Oracle Home filesystem must have at least 7.2 GB available before extraction."
     elif [ "$ORACLE_HOME_AVAILABLE_MB" -lt "$ORACLE_SOFTWARE_RECOMMENDED_MB" ]; then
-        echo "WARN: Oracle Home filesystem has less than the recommended 100 GB of available space."
-        WARN_COUNT=$((WARN_COUNT + 1))
+        record_warn "Oracle Home filesystem has less than the recommended 100 GB of available space."
     else
-        echo "PASS: Oracle Home filesystem has at least 100 GB of available space."
-        PASS_COUNT=$((PASS_COUNT + 1))
+        record_pass "Oracle Home filesystem has at least 100 GB of available space."
     fi
 else
-    echo "FAIL: Cannot determine available space for Oracle Home: $ORACLE_HOME"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
+    record_fail "Cannot determine available space for Oracle Home: $ORACLE_HOME"
 fi
 
 for ORACLE_DIR in "$SOFTWARE_SOURCE_DIR" "$ORACLE_BASE" "$ORACLE_HOME" "$ORA_INVENTORY"; do
     if [ -e "$ORACLE_DIR" ] && [ ! -d "$ORACLE_DIR" ]; then
-        echo "FAIL: Path exists but is not a directory: $ORACLE_DIR"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
+        record_fail "Path exists but is not a directory: $ORACLE_DIR"
     elif [ -d "$ORACLE_DIR" ]; then
-        echo "PASS: Directory exists: $ORACLE_DIR"
-        PASS_COUNT=$((PASS_COUNT + 1))
+        record_pass "Directory exists: $ORACLE_DIR"
     elif [ "$ORACLE_DIR" = "$ORA_INVENTORY" ] && [ "$INVENTORY_DECLARED" -eq 1 ]; then
-        echo "FAIL: oraInst.loc points to a missing Inventory directory: $ORA_INVENTORY"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
+        record_fail "oraInst.loc points to a missing Inventory directory: $ORA_INVENTORY"
     else
-        echo "WARN: Directory will be created: $ORACLE_DIR"
-        WARN_COUNT=$((WARN_COUNT + 1))
+        record_warn "Directory will be created: $ORACLE_DIR"
     fi
 done
 
 if [ -d "$ORA_INVENTORY" ]; then
     if ! getent group "$INVENTORY_GROUP" >/dev/null 2>&1; then
-        echo "FAIL: Oracle Inventory group does not exist: $INVENTORY_GROUP"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
+        record_fail "Oracle Inventory group does not exist: $INVENTORY_GROUP"
     elif [ "$(stat -c %G "$ORA_INVENTORY" 2>/dev/null)" != "$INVENTORY_GROUP" ]; then
-        echo "FAIL: Oracle Inventory directory group does not match $INVENTORY_GROUP: $ORA_INVENTORY"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
+        record_fail "Oracle Inventory directory group does not match $INVENTORY_GROUP: $ORA_INVENTORY"
     else
-        echo "PASS: Oracle Inventory directory group is correct: $INVENTORY_GROUP"
-        PASS_COUNT=$((PASS_COUNT + 1))
+        record_pass "Oracle Inventory directory group is correct: $INVENTORY_GROUP"
     fi
     if [ "$ORACLE_USER_EXISTS" -eq 1 ]; then
         if id -nG "$ORACLE_OWNER" | tr ' ' '\n' | grep -Fxq "$INVENTORY_GROUP" &&
            runuser -u "$ORACLE_OWNER" -- test -r "$ORA_INVENTORY" &&
            runuser -u "$ORACLE_OWNER" -- test -w "$ORA_INVENTORY" &&
            runuser -u "$ORACLE_OWNER" -- test -x "$ORA_INVENTORY"; then
-            echo "PASS: $ORACLE_OWNER can use the Oracle Inventory."
-            PASS_COUNT=$((PASS_COUNT + 1))
+            record_pass "$ORACLE_OWNER can use the Oracle Inventory."
         else
-            echo "FAIL: $ORACLE_OWNER cannot use Inventory group or directory: $ORA_INVENTORY"
-            FAIL_COUNT=$((FAIL_COUNT + 1))
+            record_fail "$ORACLE_OWNER cannot use Inventory group or directory: $ORA_INVENTORY"
         fi
     fi
 fi
 
 if [ -d "$ORACLE_HOME" ]; then
-    echo "PASS: Oracle Home is empty and ready for extraction."
-    PASS_COUNT=$((PASS_COUNT + 1))
+    record_pass "Oracle Home is empty and ready for extraction."
 fi
 
 if [ -f "$SOFTWARE_SOURCE_DIR/$ZIP_FILE" ]; then
-    echo "PASS: Oracle Database 19c ZIP is available: $SOFTWARE_SOURCE_DIR/$ZIP_FILE"
-    PASS_COUNT=$((PASS_COUNT + 1))
+    record_pass "Oracle Database 19c ZIP is available: $SOFTWARE_SOURCE_DIR/$ZIP_FILE"
 else
-    echo "FAIL: Oracle Database 19c ZIP is missing: $SOFTWARE_SOURCE_DIR/$ZIP_FILE"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
+    record_fail "Oracle Database 19c ZIP is missing: $SOFTWARE_SOURCE_DIR/$ZIP_FILE"
 fi
 
 if [ "$ORACLE_USER_EXISTS" -eq 1 ]; then
@@ -678,11 +618,9 @@ if [ "$ORACLE_USER_EXISTS" -eq 1 ]; then
             if runuser -u "$ORACLE_OWNER" -- test -r "$ORACLE_DIR" &&
                runuser -u "$ORACLE_OWNER" -- test -w "$ORACLE_DIR" &&
                runuser -u "$ORACLE_OWNER" -- test -x "$ORACLE_DIR"; then
-                echo "PASS: $ORACLE_OWNER can read, write, and access: $ORACLE_DIR"
-                PASS_COUNT=$((PASS_COUNT + 1))
+                record_pass "$ORACLE_OWNER can read, write, and access: $ORACLE_DIR"
             else
-                echo "FAIL: $ORACLE_OWNER cannot read, write, and access: $ORACLE_DIR"
-                FAIL_COUNT=$((FAIL_COUNT + 1))
+                record_fail "$ORACLE_OWNER cannot read, write, and access: $ORACLE_DIR"
             fi
         fi
     done
@@ -697,20 +635,16 @@ if [ "$CREATE_DB" -eq 1 ]; then
     # Database checks use the SID and Listener port supplied for this run.
     # They are never inferred from an existing profile or Listener file.
     if [[ "$ORACLE_SID" =~ ^[A-Z][A-Z0-9]{0,7}$ ]]; then
-        echo "PASS: SID format is valid: $ORACLE_SID"
-        PASS_COUNT=$((PASS_COUNT + 1))
+        record_pass "SID format is valid: $ORACLE_SID"
     else
-        echo "FAIL: SID must contain 1-8 uppercase letters or digits and start with a letter."
-        FAIL_COUNT=$((FAIL_COUNT + 1))
+        record_fail "SID must contain 1-8 uppercase letters or digits and start with a letter."
     fi
 
     if [[ "$LISTENER_PORT" =~ ^[1-9][0-9]{3,4}$ ]] &&
        [ "$LISTENER_PORT" -ge 1024 ] && [ "$LISTENER_PORT" -le 65535 ]; then
-        echo "PASS: Listener port format is valid: $LISTENER_PORT"
-        PASS_COUNT=$((PASS_COUNT + 1))
+        record_pass "Listener port format is valid: $LISTENER_PORT"
     else
-        echo "FAIL: Listener port must be between 1024 and 65535."
-        FAIL_COUNT=$((FAIL_COUNT + 1))
+        record_fail "Listener port must be between 1024 and 65535."
     fi
 
     if [ -z "$DB_SERVICE" ]; then
@@ -721,42 +655,34 @@ if [ "$CREATE_DB" -eq 1 ]; then
     DATABASE_MARKER="$ORACLE_BASE/.DB_${ORACLE_SID}_complete"
 
     if [[ "$DB_SERVICE" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
-        echo "PASS: Database service format is valid: $DB_SERVICE"
-        PASS_COUNT=$((PASS_COUNT + 1))
+        record_pass "Database service format is valid: $DB_SERVICE"
     else
-        echo "FAIL: Database service contains unsupported characters: $DB_SERVICE"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
+        record_fail "Database service contains unsupported characters: $DB_SERVICE"
     fi
 
     # Markers are evidence that the SID or Listener name was already used.
     # Database and Listener stages are never resumed or adopted by this project.
     if [ -e "$DATABASE_MARKER" ] || [ -L "$DATABASE_MARKER" ]; then
-        echo "FAIL: Oracle SID already exists or has existing database artifacts: $ORACLE_SID"
+        record_fail "Oracle SID already exists or has existing database artifacts: $ORACLE_SID"
         echo "Use a different ORACLE_SID and rerun the installer."
-        FAIL_COUNT=$((FAIL_COUNT + 1))
     else
-        echo "PASS: No database marker exists for SID: $ORACLE_SID"
-        PASS_COUNT=$((PASS_COUNT + 1))
+        record_pass "No database marker exists for SID: $ORACLE_SID"
     fi
     if [ -e "$LISTENER_MARKER" ] || [ -L "$LISTENER_MARKER" ]; then
-        echo "FAIL: Listener already exists: $LISTENER_NAME"
+        record_fail "Listener already exists: $LISTENER_NAME"
         echo "Use a different ORACLE_SID and rerun the installer."
-        FAIL_COUNT=$((FAIL_COUNT + 1))
     else
-        echo "PASS: No Listener marker exists for name: $LISTENER_NAME"
-        PASS_COUNT=$((PASS_COUNT + 1))
+        record_pass "No Listener marker exists for name: $LISTENER_NAME"
     fi
 
     REGISTERED_DB=""
     # Every independent Oracle trace is a conflict for a new database target.
     if [ -r /etc/oratab ]; then
         if ! REGISTERED_DB=$(awk -F: -v name="$ORACLE_SID" '$0 !~ /^[[:space:]]*#/ && toupper($1)==name {print}' /etc/oratab); then
-            echo "FAIL: Cannot inspect /etc/oratab."
-            FAIL_COUNT=$((FAIL_COUNT + 1))
+            record_fail "Cannot inspect /etc/oratab."
         fi
     else
-        echo "WARN: /etc/oratab is not available before software root scripts run."
-        WARN_COUNT=$((WARN_COUNT + 1))
+        record_warn "/etc/oratab is not available before software root scripts run."
     fi
 
     PROCESS_LIST=""
@@ -764,11 +690,9 @@ if [ "$CREATE_DB" -eq 1 ]; then
     DB_RUNNING=0
     LISTENER_RUNNING=0
     if ! command -v ps >/dev/null 2>&1; then
-        echo "FAIL: Required target command is missing: ps"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
+        record_fail "Required target command is missing: ps"
     elif ! PROCESS_LIST=$(ps -eo args= 2>/dev/null); then
-        echo "FAIL: Cannot inspect running processes."
-        FAIL_COUNT=$((FAIL_COUNT + 1))
+        record_fail "Cannot inspect running processes."
     else
         PROCESS_INSPECTION_OK=1
     fi
@@ -782,37 +706,29 @@ if [ "$CREATE_DB" -eq 1 ]; then
     DB_FILES=""
     if [ -d "$ORACLE_HOME/dbs" ]; then
         if ! DB_FILES=$(find "$ORACLE_HOME/dbs" -maxdepth 1 \( -iname "spfile$ORACLE_SID.ora" -o -iname "init$ORACLE_SID.ora" -o -iname "orapw$ORACLE_SID" -o -iname "lk$ORACLE_SID" \) -print 2>/dev/null); then
-            echo "FAIL: Cannot inspect target database files in Oracle Home."
-            FAIL_COUNT=$((FAIL_COUNT + 1))
+            record_fail "Cannot inspect target database files in Oracle Home."
         fi
     fi
 
     if [ -n "$REGISTERED_DB" ] || [ "$DB_RUNNING" -eq 1 ] || [ -n "$DB_FILES" ]; then
-        echo "FAIL: Oracle SID already exists or has existing database artifacts: $ORACLE_SID"
+        record_fail "Oracle SID already exists or has existing database artifacts: $ORACLE_SID"
         echo "Use a different ORACLE_SID and rerun the installer."
-        FAIL_COUNT=$((FAIL_COUNT + 1))
     elif [ "$PROCESS_INSPECTION_OK" -eq 1 ]; then
-        echo "PASS: Oracle SID is not registered, running, or present in Oracle Home."
-        PASS_COUNT=$((PASS_COUNT + 1))
+        record_pass "Oracle SID is not registered, running, or present in Oracle Home."
     fi
 
     for ROOT_DIR in "$DATA_DIR" "$FRA_DIR"; do
         if [[ "$ROOT_DIR" != /* ]] || [ "$ROOT_DIR" = / ]; then
-            echo "FAIL: Storage root must be an absolute path other than /: $ROOT_DIR"
-            FAIL_COUNT=$((FAIL_COUNT + 1))
+            record_fail "Storage root must be an absolute path other than /: $ROOT_DIR"
         elif [ -L "$ROOT_DIR/$ORACLE_SID" ] || [ -e "$ROOT_DIR/$ORACLE_SID" ]; then
-            echo "FAIL: Oracle SID already exists or has existing database artifacts: $ORACLE_SID"
+            record_fail "Oracle SID already exists or has existing database artifacts: $ORACLE_SID"
             echo "Use a different ORACLE_SID and rerun the installer."
-            FAIL_COUNT=$((FAIL_COUNT + 1))
         elif [ -e "$ROOT_DIR" ] && [ ! -d "$ROOT_DIR" ]; then
-            echo "FAIL: Storage root exists but is not a directory: $ROOT_DIR"
-            FAIL_COUNT=$((FAIL_COUNT + 1))
+            record_fail "Storage root exists but is not a directory: $ROOT_DIR"
         elif [ -d "$ROOT_DIR" ]; then
-            echo "PASS: Storage root is ready: $ROOT_DIR"
-            PASS_COUNT=$((PASS_COUNT + 1))
+            record_pass "Storage root is ready: $ROOT_DIR"
         else
-            echo "WARN: Storage root will be created: $ROOT_DIR"
-            WARN_COUNT=$((WARN_COUNT + 1))
+            record_warn "Storage root will be created: $ROOT_DIR"
         fi
     done
 
@@ -822,15 +738,12 @@ if [ "$CREATE_DB" -eq 1 ]; then
     # Strip comments for simple target-name and endpoint checks. IFILE is not
     # expanded because included Listener configuration needs DBA review.
     if [ -e "$LISTENER_FILE" ] && [ ! -r "$LISTENER_FILE" ]; then
-        echo "FAIL: Listener configuration is not readable: $LISTENER_FILE"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
+        record_fail "Listener configuration is not readable: $LISTENER_FILE"
     elif [ -r "$LISTENER_FILE" ]; then
         if ! LISTENER_CONFIG=$(sed 's/#.*//' "$LISTENER_FILE"); then
-            echo "FAIL: Cannot inspect Listener configuration: $LISTENER_FILE"
-            FAIL_COUNT=$((FAIL_COUNT + 1))
+            record_fail "Cannot inspect Listener configuration: $LISTENER_FILE"
         elif printf '%s\n' "$LISTENER_CONFIG" | grep -Eiq '^[[:space:]]*IFILE[[:space:]]*='; then
-            echo "FAIL: Included Listener configuration requires manual review: $LISTENER_FILE"
-            FAIL_COUNT=$((FAIL_COUNT + 1))
+            record_fail "Included Listener configuration requires manual review: $LISTENER_FILE"
         fi
     fi
 
@@ -838,11 +751,9 @@ if [ "$CREATE_DB" -eq 1 ]; then
     SOCKET_INSPECTION_OK=0
     PORT_IN_USE=0
     if ! command -v ss >/dev/null 2>&1; then
-        echo "FAIL: Required target command is missing: ss"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
+        record_fail "Required target command is missing: ss"
     elif ! SOCKETS=$(ss -H -ltn 2>/dev/null); then
-        echo "FAIL: Cannot inspect listening TCP ports."
-        FAIL_COUNT=$((FAIL_COUNT + 1))
+        record_fail "Cannot inspect listening TCP ports."
     else
         SOCKET_INSPECTION_OK=1
     fi
@@ -863,21 +774,17 @@ if [ "$CREATE_DB" -eq 1 ]; then
     fi
 
     if [ "$LISTENER_NAME_EXISTS" -eq 1 ]; then
-        echo "FAIL: Listener already exists: $LISTENER_NAME"
+        record_fail "Listener already exists: $LISTENER_NAME"
         echo "Use a different ORACLE_SID and rerun the installer."
-        FAIL_COUNT=$((FAIL_COUNT + 1))
     elif [ "$PROCESS_INSPECTION_OK" -eq 1 ]; then
-        echo "PASS: Listener name is not configured or running: $LISTENER_NAME"
-        PASS_COUNT=$((PASS_COUNT + 1))
+        record_pass "Listener name is not configured or running: $LISTENER_NAME"
     fi
 
     if [ "$PORT_IN_USE" -eq 1 ]; then
-        echo "FAIL: Listener port is already in use: $LISTENER_PORT"
+        record_fail "Listener port is already in use: $LISTENER_PORT"
         echo "Use an unused LISTENER_PORT and rerun the installer."
-        FAIL_COUNT=$((FAIL_COUNT + 1))
     elif [ "$SOCKET_INSPECTION_OK" -eq 1 ]; then
-        echo "PASS: Listener TCP port is available: $LISTENER_PORT"
-        PASS_COUNT=$((PASS_COUNT + 1))
+        record_pass "Listener TCP port is available: $LISTENER_PORT"
     fi
 
 fi
