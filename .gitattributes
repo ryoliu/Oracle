@@ -1,1 +1,2 @@
 *.sh text eol=lf
+oracle_install.conf text eol=lf
