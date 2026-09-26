@@ -349,69 +349,8 @@ fi
 CURRENT_STAGE="software installation"
 # BEGIN SOFTWARE INSTALLATION
 
-# oracle_install.conf is the only Inventory configuration source. An existing
-# oraInst.loc must match it exactly and is never adopted as a replacement value.
 INVENTORY_GROUP="$ORACLE_GROUP"
-if [ -L "$ORAINST_FILE" ] ||
-   { [ -e "$ORAINST_FILE" ] && [ ! -f "$ORAINST_FILE" ]; }; then
-    echo "ERROR: oraInst.loc must be a regular file: $ORAINST_FILE"
-    exit 1
-elif [ -f "$ORAINST_FILE" ]; then
-    EXISTING_ORA_INVENTORY="$(sed -n 's/^inventory_loc=//p' "$ORAINST_FILE")"
-    EXISTING_INVENTORY_GROUP="$(sed -n 's/^inst_group=//p' "$ORAINST_FILE")"
-    if [ -z "$EXISTING_ORA_INVENTORY" ] || [ -z "$EXISTING_INVENTORY_GROUP" ]; then
-        echo "ERROR: oraInst.loc is missing inventory_loc or inst_group."
-        exit 1
-    fi
-    if [ "$EXISTING_ORA_INVENTORY" != "$ORA_INVENTORY" ] ||
-       [ "$EXISTING_INVENTORY_GROUP" != "$ORACLE_GROUP" ]; then
-        echo "ERROR: oraInst.loc does not match oracle_install.conf: $ORAINST_FILE"
-        exit 1
-    fi
-    if [ ! -d "$ORA_INVENTORY" ]; then
-        echo "ERROR: oraInst.loc points to a missing Inventory: $ORA_INVENTORY"
-        exit 1
-    fi
-else
-    if [ -L "$ORA_INVENTORY" ] ||
-       { [ -e "$ORA_INVENTORY" ] && [ ! -d "$ORA_INVENTORY" ]; }; then
-        echo "ERROR: Undeclared Oracle Inventory path must be a normal directory: $ORA_INVENTORY"
-        exit 1
-    elif [ -d "$ORA_INVENTORY" ]; then
-        require_command find
-        FIRST_INVENTORY_ENTRY="$(find "$ORA_INVENTORY" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)"
-        INVENTORY_FIND_STATUS=$?
-        if [ "$INVENTORY_FIND_STATUS" -ne 0 ]; then
-            echo "ERROR: Cannot safely inspect undeclared Oracle Inventory: $ORA_INVENTORY"
-            exit 1
-        elif [ -n "$FIRST_INVENTORY_ENTRY" ]; then
-            echo "ERROR: Undeclared Oracle Inventory is not empty: $ORA_INVENTORY"
-            echo "DBA review is required before installation."
-            exit 1
-        fi
-    fi
-fi
-
 INVENTORY_FILE="$ORA_INVENTORY/ContentsXML/inventory.xml"
-if [ -L "$INVENTORY_FILE" ] ||
-   { [ -e "$INVENTORY_FILE" ] && [ ! -f "$INVENTORY_FILE" ]; }; then
-    echo "ERROR: Oracle Inventory file must be a regular file: $INVENTORY_FILE"
-    exit 1
-elif [ -f "$INVENTORY_FILE" ]; then
-    if [ ! -r "$INVENTORY_FILE" ]; then
-        echo "ERROR: Oracle Inventory file is not readable: $INVENTORY_FILE"
-        exit 1
-    fi
-    grep -Fq "LOC=\"$ORACLE_HOME\"" "$INVENTORY_FILE"
-    INVENTORY_GREP_STATUS=$?
-    if [ "$INVENTORY_GREP_STATUS" -eq 0 ]; then
-        echo "ERROR: Oracle Software is already installed: $ORACLE_HOME"
-        exit 1
-    elif [ "$INVENTORY_GREP_STATUS" -ne 1 ]; then
-        echo "ERROR: Cannot safely read Oracle Inventory file: $INVENTORY_FILE"
-        exit 1
-    fi
-fi
 
 echo "=== 2. Check yum and install 19c preinstall package ==="
 

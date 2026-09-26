@@ -347,14 +347,13 @@ else
         echo "FAIL: Required command is missing for kernel comparison: sort"
         FAIL_COUNT=$((FAIL_COUNT + 1))
     elif printf '%s\n%s\n' "$MINIMUM_KERNEL" "$KERNEL_RELEASE" | LC_ALL=C sort -V -C; then
+        echo "PASS: Running kernel meets the documented minimum for $KERNEL_FAMILY: $KERNEL_RELEASE"
+        echo "INFO: This checks the kernel minimum only; full certification is not verified."
+        PASS_COUNT=$((PASS_COUNT + 1))
         if [ -n "$KERNEL_RU_NOTE" ]; then
-            echo "FAIL: $KERNEL_RU_NOTE"
-            echo "FAIL: This installer uses Oracle Database 19c 19.3 Base Media and does not apply an RU."
-            FAIL_COUNT=$((FAIL_COUNT + 1))
-        else
-            echo "PASS: Running kernel meets the documented minimum for $KERNEL_FAMILY: $KERNEL_RELEASE"
-            echo "INFO: This checks the kernel minimum only; full certification is not verified."
-            PASS_COUNT=$((PASS_COUNT + 1))
+            echo "WARN: $KERNEL_RU_NOTE"
+            echo "WARN: Continuing for 19.3 Base Media testing only; this is not a certified production combination."
+            WARN_COUNT=$((WARN_COUNT + 1))
         fi
     else
         echo "FAIL: Running kernel is below the documented minimum for $KERNEL_FAMILY: $KERNEL_RELEASE"

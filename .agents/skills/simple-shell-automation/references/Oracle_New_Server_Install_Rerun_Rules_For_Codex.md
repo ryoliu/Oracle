@@ -68,6 +68,8 @@ LINUX.X64_193000_db_home.zip
 
 這個測試版只用於驗證 19.3 Base Media 的安裝流程、重跑狀態、Listener、DBCA、PreCheck 與 PostCheck，不是正式環境的 Patch 或認證基準。
 
+Oracle Linux 8 UEK7 的 kernel release 若符合已知最低版本，PreCheck 應通過 kernel minimum check，但必須顯示 WARN，指出此組合正式支援需要 Oracle Database 19c RU 19.21 或更新版本。由於目前測試版不套用 RU，該 WARN 只允許繼續驗證 19.3 Base Media 安裝流程，不得描述為正式支援或認證組合。低於已知最低 kernel 版本仍必須 FAIL。
+
 Oracle Linux 8 的 Bug 29772579 例外必須維持原有限制：只有確認 Oracle Linux 8 缺少 `compat-libcap1` 時，才允許對 19.3 Base Installer 加入 `-ignorePrereqFailure`。這項限制只約束選項的啟用條件；`-ignorePrereqFailure` 本身會讓 OUI 忽略所有 prerequisite check failures，無法限定只忽略 `compat-libcap1`。
 
 專案 PreCheck 可降低已知的 OS、Architecture、Kernel、Memory、Swap、Filesystem 與 Package 風險，但不能取代或完整重現 OUI prerequisite engine，也不得宣稱其他 OUI prerequisite failures 一定已解決。OUI 回傳 exit code `6` 時，必須清楚警告 DBA：安裝是在忽略 prerequisite results 後完成，且必須人工檢查 Oracle Installer log；不能把 code `6` 描述成只忽略 Bug 29772579。

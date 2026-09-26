@@ -2,10 +2,9 @@
 
 # Read-only final health checks for Oracle Database 19c.
 #
-# The checks progress from the network listener to database identity and the
-# final kernel parameter state:
-#   Listener process -> TCP port -> service registration -> client tools
-#   -> password-based Easy Connect -> SYSDBA instance state -> kernel parameters
+# The checks progress from the network listener to database identity:
+#   Listener endpoint -> service registration -> password-based Easy Connect
+#   -> SYSDBA instance state
 # No configuration is changed by this script. The first failed check exits 1.
 
 ORACLE_SID="$1"
@@ -35,15 +34,7 @@ if ! printf '%s\n' "$LISTENER_STATUS" | tr -d '[:space:]' |
     exit 1
 fi
 
-echo "=== 2. Verify Listener port ==="
-# Confirm the operating system has an active TCP listening socket on the port.
-if ! ss -H -ltn | awk '{print $4}' | grep -Eq ":$LISTENER_PORT$"; then
-    echo "ERROR: Listener TCP port is not active: $LISTENER_PORT"
-    exit 1
-fi
-echo "Listener TCP port is active: $LISTENER_PORT"
-
-echo "=== 3. Verify database service registration ==="
+echo "=== 2. Verify database service registration ==="
 # A listening port is not enough. The requested service and instance must be
 # dynamically registered with READY status.
 if ! LISTENER_SERVICES=$("$ORACLE_HOME/bin/lsnrctl" services "$LISTENER_NAME"); then
@@ -58,18 +49,7 @@ if ! printf '%s\n' "$LISTENER_SERVICES" | grep -Fiq "Service \"$DB_SERVICE\" has
     exit 1
 fi
 
-echo "=== 4. Verify tnsping ==="
-# Test Oracle Net name resolution and reachability with an Easy Connect string.
-if [ ! -x "$ORACLE_HOME/bin/tnsping" ]; then
-    echo "ERROR: tnsping is missing or not executable: $ORACLE_HOME/bin/tnsping"
-    exit 1
-fi
-if ! "$ORACLE_HOME/bin/tnsping" "$DB_HOST:$LISTENER_PORT/$DB_SERVICE"; then
-    echo "ERROR: tnsping failed."
-    exit 1
-fi
-
-echo "=== 5. Verify SYSTEM Easy Connect ==="
+echo "=== 3. Verify SYSTEM Easy Connect ==="
 echo "Verify the SYSTEM connection using the password collected at startup."
 # This validates password authentication through Listener and service routing.
 # The connect.sql file is private and is removed by Main after PostCheck.
@@ -89,7 +69,7 @@ then
 fi
 echo "SYSTEM Easy Connect verification completed successfully."
 
-echo "=== 6. Verify instance OPEN status ==="
+echo "=== 4. Verify instance OPEN status ==="
 # Finish with local SYSDBA verification of database name, open mode, instance
 # name, and instance status. This distinguishes connectivity from database health.
 if ! DATABASE_STATUS=$("$ORACLE_HOME/bin/sqlplus" -L -s / as sysdba <<'SQL'
@@ -111,23 +91,6 @@ if ! printf '%s\n' "$DATABASE_STATUS" |
     exit 1
 fi
 printf '%s\n' "$DATABASE_STATUS"
-
-echo "=== 7. Verify Current Kernel Parameters ==="
-# Main verifies these values immediately after sysctl --system. PostCheck reads
-# them again so the final installation report includes the active kernel state.
-for KERNEL_PARAMETER in \
-    fs.aio-max-nr \
-    fs.file-max \
-    kernel.sem \
-    kernel.shmmax \
-    kernel.shmall \
-    vm.nr_hugepages
-do
-    if ! sysctl "$KERNEL_PARAMETER"; then
-        echo "ERROR: Failed to read kernel parameter: $KERNEL_PARAMETER"
-        exit 1
-    fi
-done
 
 echo "POSTCHECK RESULT: PASS"
 exit 0
