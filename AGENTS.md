@@ -16,6 +16,17 @@
 - 只修改與目前需求相關的程式碼。
 - 不要順便重構與目前需求無關的區段。
 
+## 終端輸出顯示規則
+
+- PreCheck 的 `WARN:` 前綴使用黃色顯示。
+- PreCheck 的 `FAIL:` 前綴使用紅色顯示。
+- 只對狀態前綴套用顏色，訊息本文維持終端預設顏色。
+- Software hard gate、累計檢查、結果摘要及 `PRECHECK RESULT` 必須使用一致的顯示方式。
+- 只有標準輸出連接至互動式終端，且 `TERM` 不是 `dumb` 時才輸出 ANSI 顏色。
+- 輸出重新導向至檔案或非互動式環境時，不得包含 ANSI 控制碼。
+- Shell Script 使用 `printf` 輸出顏色，不使用 `echo -e`。
+- 顏色只用於提高可讀性，不得作為判斷 PASS、WARN 或 FAIL 的程式邏輯。
+
 ## 支援的作業系統
 
 此專案只支援 **Oracle Linux 8.x（OEL8 / OL8）**。

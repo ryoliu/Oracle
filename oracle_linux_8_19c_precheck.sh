@@ -9,26 +9,66 @@
 # This script never installs packages, edits files, starts services, or creates
 # Oracle resources. It exits 1 when at least one FAIL is recorded.
 
+COLOR_YELLOW=""
+COLOR_RED=""
+COLOR_RESET=""
+
+if [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ]; then
+    COLOR_YELLOW="$(printf '\033[33m')"
+    COLOR_RED="$(printf '\033[31m')"
+    COLOR_RESET="$(printf '\033[0m')"
+fi
+
+print_warn() {
+    printf '%sWARN:%s %s\n' "$COLOR_YELLOW" "$COLOR_RESET" "$1"
+}
+
+print_fail() {
+    printf '%sFAIL:%s %s\n' "$COLOR_RED" "$COLOR_RESET" "$1"
+}
+
+print_precheck_result_fail() {
+    printf 'PRECHECK RESULT: %sFAIL%s\n' "$COLOR_RED" "$COLOR_RESET"
+}
+
+print_usage() {
+    echo "Usage:"
+    echo "  $0"
+    echo "  $0 --create-db --allow-complete-software --sid SID --listener-port PORT"
+    echo "  $0 --target-only --allow-complete-software --sid SID --listener-port PORT"
+    echo ""
+    echo "Modes:"
+    echo "  No options       Check a new Oracle Software installation."
+    echo "  --create-db      Run general checks and new database target checks."
+    echo "  --target-only    Run only new database target checks after the Software hard gate."
+    echo ""
+    echo "Options:"
+    echo "  --allow-complete-software  Allow only verified project-managed Software."
+    echo "  --sid SID                  New Oracle SID, using 1-8 uppercase letters or digits."
+    echo "  --listener-port PORT       New Listener TCP port from 1024 through 65535."
+    echo "  --help                     Show this help."
+}
+
 if ! SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; then
-    echo "FAIL: Cannot determine the script directory."
+    print_fail "Cannot determine the script directory."
     exit 1
 fi
 CONFIG_FILE="$SCRIPT_DIR/oracle_install.conf"
 
 if [ -L "$CONFIG_FILE" ] || [ ! -f "$CONFIG_FILE" ]; then
-    echo "FAIL: Configuration must be a regular file: $CONFIG_FILE"
+    print_fail "Configuration must be a regular file: $CONFIG_FILE"
     exit 1
 fi
 
 if ! . "$CONFIG_FILE"; then
-    echo "FAIL: Failed to load configuration: $CONFIG_FILE"
+    print_fail "Failed to load configuration: $CONFIG_FILE"
     exit 1
 fi
 
 if [ -z "${ORACLE_HOME:-}" ] || [ -z "${ORA_INVENTORY:-}" ] ||
    [ -z "${ORAINST_FILE:-}" ] || [ -z "${ORACLE_OWNER:-}" ] ||
    [ -z "${ORACLE_GROUP:-}" ]; then
-    echo "FAIL: Oracle Home or Inventory settings are missing from: $CONFIG_FILE"
+    print_fail "Oracle Home or Inventory settings are missing from: $CONFIG_FILE"
     exit 1
 fi
 
@@ -50,20 +90,19 @@ PASS_COUNT=0
 WARN_COUNT=0
 FAIL_COUNT=0
 
-# These helpers record accumulated checks. Software hard-gate failures still
-# print their result and exit immediately without using these functions.
+# These helpers record accumulated checks after the Software hard gate.
 record_pass() {
     echo "PASS: $1"
     PASS_COUNT=$((PASS_COUNT + 1))
 }
 
 record_warn() {
-    echo "WARN: $1"
+    print_warn "$1"
     WARN_COUNT=$((WARN_COUNT + 1))
 }
 
 record_fail() {
-    echo "FAIL: $1"
+    print_fail "$1"
     FAIL_COUNT=$((FAIL_COUNT + 1))
 }
 
@@ -92,7 +131,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         --sid)
             if [ "$#" -lt 2 ]; then
-                echo "FAIL: --sid requires a value."
+                print_fail "--sid requires a value."
                 exit 1
             fi
             ORACLE_SID="$2"
@@ -100,19 +139,18 @@ while [ "$#" -gt 0 ]; do
             ;;
         --listener-port)
             if [ "$#" -lt 2 ]; then
-                echo "FAIL: --listener-port requires a value."
+                print_fail "--listener-port requires a value."
                 exit 1
             fi
             LISTENER_PORT="$2"
             shift 2
             ;;
         --help)
-            echo "Usage: $0 [--create-db --sid SID --listener-port PORT]"
-            echo "       $0 --target-only --sid SID --listener-port PORT"
+            print_usage
             exit 0
             ;;
         *)
-            echo "FAIL: Unknown option: $1"
+            print_fail "Unknown option: $1"
             exit 1
             ;;
     esac
@@ -124,53 +162,53 @@ for REQUIRED_COMMAND in grep sed find; do
     if command -v "$REQUIRED_COMMAND" >/dev/null 2>&1; then
         continue
     fi
-    echo "FAIL: Required command is missing: $REQUIRED_COMMAND"
-    echo "PRECHECK RESULT: FAIL"
+    print_fail "Required command is missing: $REQUIRED_COMMAND"
+    print_precheck_result_fail
     exit 1
 done
 
 if [ -L "$ORAINST_FILE" ] ||
    { [ -e "$ORAINST_FILE" ] && [ ! -f "$ORAINST_FILE" ]; }; then
-    echo "FAIL: oraInst.loc must be a regular file: $ORAINST_FILE"
-    echo "PRECHECK RESULT: FAIL"
+    print_fail "oraInst.loc must be a regular file: $ORAINST_FILE"
+    print_precheck_result_fail
     exit 1
 elif [ -f "$ORAINST_FILE" ]; then
     if [ ! -r "$ORAINST_FILE" ]; then
-        echo "FAIL: oraInst.loc is not readable: $ORAINST_FILE"
-        echo "PRECHECK RESULT: FAIL"
+        print_fail "oraInst.loc is not readable: $ORAINST_FILE"
+        print_precheck_result_fail
         exit 1
     fi
     DECLARED_ORA_INVENTORY="$(sed -n 's/^inventory_loc=//p' "$ORAINST_FILE")"
     DECLARED_INVENTORY_GROUP="$(sed -n 's/^inst_group=//p' "$ORAINST_FILE")"
     if [ -z "$DECLARED_ORA_INVENTORY" ] || [ -z "$DECLARED_INVENTORY_GROUP" ]; then
-        echo "FAIL: oraInst.loc is missing inventory_loc or inst_group: $ORAINST_FILE"
-        echo "PRECHECK RESULT: FAIL"
+        print_fail "oraInst.loc is missing inventory_loc or inst_group: $ORAINST_FILE"
+        print_precheck_result_fail
         exit 1
     fi
     if [ "$DECLARED_ORA_INVENTORY" != "$ORA_INVENTORY" ] ||
        [ "$DECLARED_INVENTORY_GROUP" != "$ORACLE_GROUP" ]; then
-        echo "FAIL: oraInst.loc does not match oracle_install.conf: $ORAINST_FILE"
-        echo "PRECHECK RESULT: FAIL"
+        print_fail "oraInst.loc does not match oracle_install.conf: $ORAINST_FILE"
+        print_precheck_result_fail
         exit 1
     fi
     INVENTORY_DECLARED=1
 else
     if [ -L "$ORA_INVENTORY" ] ||
        { [ -e "$ORA_INVENTORY" ] && [ ! -d "$ORA_INVENTORY" ]; }; then
-        echo "FAIL: Undeclared Oracle Inventory path must be a normal directory: $ORA_INVENTORY"
-        echo "PRECHECK RESULT: FAIL"
+        print_fail "Undeclared Oracle Inventory path must be a normal directory: $ORA_INVENTORY"
+        print_precheck_result_fail
         exit 1
     elif [ -d "$ORA_INVENTORY" ]; then
         FIRST_INVENTORY_ENTRY="$(find "$ORA_INVENTORY" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)"
         INVENTORY_FIND_STATUS=$?
         if [ "$INVENTORY_FIND_STATUS" -ne 0 ]; then
-            echo "FAIL: Cannot safely inspect undeclared Oracle Inventory: $ORA_INVENTORY"
-            echo "PRECHECK RESULT: FAIL"
+            print_fail "Cannot safely inspect undeclared Oracle Inventory: $ORA_INVENTORY"
+            print_precheck_result_fail
             exit 1
         elif [ -n "$FIRST_INVENTORY_ENTRY" ]; then
-            echo "FAIL: Undeclared Oracle Inventory is not empty: $ORA_INVENTORY"
+            print_fail "Undeclared Oracle Inventory is not empty: $ORA_INVENTORY"
             echo "DBA review is required before installation."
-            echo "PRECHECK RESULT: FAIL"
+            print_precheck_result_fail
             exit 1
         fi
     fi
@@ -180,13 +218,13 @@ SOFTWARE_INVENTORY_FILE="$ORA_INVENTORY/ContentsXML/inventory.xml"
 TARGET_HOME_REGISTERED=0
 if [ -L "$SOFTWARE_INVENTORY_FILE" ] ||
    { [ -e "$SOFTWARE_INVENTORY_FILE" ] && [ ! -f "$SOFTWARE_INVENTORY_FILE" ]; }; then
-    echo "FAIL: Oracle Inventory file must be a regular file: $SOFTWARE_INVENTORY_FILE"
-    echo "PRECHECK RESULT: FAIL"
+    print_fail "Oracle Inventory file must be a regular file: $SOFTWARE_INVENTORY_FILE"
+    print_precheck_result_fail
     exit 1
 elif [ -f "$SOFTWARE_INVENTORY_FILE" ]; then
     if [ ! -r "$SOFTWARE_INVENTORY_FILE" ]; then
-        echo "FAIL: Oracle Inventory file is not readable: $SOFTWARE_INVENTORY_FILE"
-        echo "PRECHECK RESULT: FAIL"
+        print_fail "Oracle Inventory file is not readable: $SOFTWARE_INVENTORY_FILE"
+        print_precheck_result_fail
         exit 1
     fi
     grep -Fq "LOC=\"$ORACLE_HOME\"" "$SOFTWARE_INVENTORY_FILE"
@@ -194,8 +232,8 @@ elif [ -f "$SOFTWARE_INVENTORY_FILE" ]; then
     if [ "$INVENTORY_GREP_STATUS" -eq 0 ]; then
         TARGET_HOME_REGISTERED=1
     elif [ "$INVENTORY_GREP_STATUS" -ne 1 ]; then
-        echo "FAIL: Cannot safely read Oracle Inventory file: $SOFTWARE_INVENTORY_FILE"
-        echo "PRECHECK RESULT: FAIL"
+        print_fail "Cannot safely read Oracle Inventory file: $SOFTWARE_INVENTORY_FILE"
+        print_precheck_result_fail
         exit 1
     fi
 fi
@@ -206,13 +244,13 @@ ROOT_SH_MARKER_PRESENT=0
 
 if [ -L "$INSTALL_MARKER" ] ||
    { [ -e "$INSTALL_MARKER" ] && [ ! -f "$INSTALL_MARKER" ]; }; then
-    echo "FAIL: Installer completion marker must be a regular file: $INSTALL_MARKER"
-    echo "PRECHECK RESULT: FAIL"
+    print_fail "Installer completion marker must be a regular file: $INSTALL_MARKER"
+    print_precheck_result_fail
     exit 1
 elif [ -f "$INSTALL_MARKER" ]; then
     if [ ! -s "$INSTALL_MARKER" ] || [ ! -r "$INSTALL_MARKER" ]; then
-        echo "FAIL: Installer completion marker is empty or unreadable: $INSTALL_MARKER"
-        echo "PRECHECK RESULT: FAIL"
+        print_fail "Installer completion marker is empty or unreadable: $INSTALL_MARKER"
+        print_precheck_result_fail
         exit 1
     fi
     INSTALL_MARKER_PRESENT=1
@@ -220,13 +258,13 @@ fi
 
 if [ -L "$ORAINST_ROOT_MARKER" ] ||
    { [ -e "$ORAINST_ROOT_MARKER" ] && [ ! -f "$ORAINST_ROOT_MARKER" ]; }; then
-    echo "FAIL: Root-script completion marker must be a regular file: $ORAINST_ROOT_MARKER"
-    echo "PRECHECK RESULT: FAIL"
+    print_fail "Root-script completion marker must be a regular file: $ORAINST_ROOT_MARKER"
+    print_precheck_result_fail
     exit 1
 elif [ -f "$ORAINST_ROOT_MARKER" ]; then
     if [ ! -r "$ORAINST_ROOT_MARKER" ]; then
-        echo "FAIL: Root-script completion marker is not readable: $ORAINST_ROOT_MARKER"
-        echo "PRECHECK RESULT: FAIL"
+        print_fail "Root-script completion marker is not readable: $ORAINST_ROOT_MARKER"
+        print_precheck_result_fail
         exit 1
     fi
     ORAINST_ROOT_MARKER_PRESENT=1
@@ -234,13 +272,13 @@ fi
 
 if [ -L "$ROOT_SH_MARKER" ] ||
    { [ -e "$ROOT_SH_MARKER" ] && [ ! -f "$ROOT_SH_MARKER" ]; }; then
-    echo "FAIL: Root-script completion marker must be a regular file: $ROOT_SH_MARKER"
-    echo "PRECHECK RESULT: FAIL"
+    print_fail "Root-script completion marker must be a regular file: $ROOT_SH_MARKER"
+    print_precheck_result_fail
     exit 1
 elif [ -f "$ROOT_SH_MARKER" ]; then
     if [ ! -r "$ROOT_SH_MARKER" ]; then
-        echo "FAIL: Root-script completion marker is not readable: $ROOT_SH_MARKER"
-        echo "PRECHECK RESULT: FAIL"
+        print_fail "Root-script completion marker is not readable: $ROOT_SH_MARKER"
+        print_precheck_result_fail
         exit 1
     fi
     ROOT_SH_MARKER_PRESENT=1
@@ -248,15 +286,15 @@ fi
 
 ORACLE_HOME_HAS_CONTENT=0
 if [ -L "$ORACLE_HOME" ] || { [ -e "$ORACLE_HOME" ] && [ ! -d "$ORACLE_HOME" ]; }; then
-    echo "FAIL: Oracle Home must be a normal directory: $ORACLE_HOME"
-    echo "PRECHECK RESULT: FAIL"
+    print_fail "Oracle Home must be a normal directory: $ORACLE_HOME"
+    print_precheck_result_fail
     exit 1
 elif [ -d "$ORACLE_HOME" ]; then
     FIRST_HOME_ENTRY="$(find "$ORACLE_HOME" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)"
     HOME_FIND_STATUS=$?
     if [ "$HOME_FIND_STATUS" -ne 0 ]; then
-        echo "FAIL: Cannot safely inspect Oracle Home: $ORACLE_HOME"
-        echo "PRECHECK RESULT: FAIL"
+        print_fail "Cannot safely inspect Oracle Home: $ORACLE_HOME"
+        print_precheck_result_fail
         exit 1
     elif [ -n "$FIRST_HOME_ENTRY" ]; then
         ORACLE_HOME_HAS_CONTENT=1
@@ -277,49 +315,61 @@ elif [ "$TARGET_HOME_REGISTERED" -eq 0 ] &&
      [ "$ORACLE_HOME_HAS_CONTENT" -eq 0 ]; then
     SOFTWARE_STATE="NEW"
 else
-    echo "FAIL: Oracle Software state is partial or inconsistent: $ORACLE_HOME"
+    print_fail "Oracle Software state is partial or inconsistent: $ORACLE_HOME"
     echo "DBA review is required. No repair or root-script retry was attempted."
-    echo "PRECHECK RESULT: FAIL"
+    print_precheck_result_fail
     exit 1
 fi
 
 if [ "$SOFTWARE_STATE" = "COMPLETE" ]; then
     if ! id "$ORACLE_OWNER" >/dev/null 2>&1; then
-        echo "FAIL: Oracle owner is missing for the complete Software state: $ORACLE_OWNER"
-        echo "PRECHECK RESULT: FAIL"
+        print_fail "Oracle owner is missing for the complete Software state: $ORACLE_OWNER"
+        print_precheck_result_fail
         exit 1
     fi
     for REQUIRED_GROUP in "$ORACLE_GROUP" dba; do
         if ! getent group "$REQUIRED_GROUP" >/dev/null 2>&1 ||
            ! id -nG "$ORACLE_OWNER" | tr ' ' '\n' | grep -Fxq "$REQUIRED_GROUP"; then
-            echo "FAIL: Oracle owner is not a member of required group: $REQUIRED_GROUP"
-            echo "PRECHECK RESULT: FAIL"
+            print_fail "Oracle owner is not a member of required group: $REQUIRED_GROUP"
+            print_precheck_result_fail
             exit 1
         fi
     done
     for REQUIRED_ORACLE_TOOL in runInstaller root.sh bin/dbca bin/lsnrctl bin/sqlplus; do
         if [ ! -x "$ORACLE_HOME/$REQUIRED_ORACLE_TOOL" ]; then
-            echo "FAIL: Required Oracle tool is missing or not executable: $ORACLE_HOME/$REQUIRED_ORACLE_TOOL"
-            echo "PRECHECK RESULT: FAIL"
+            print_fail "Required Oracle tool is missing or not executable: $ORACLE_HOME/$REQUIRED_ORACLE_TOOL"
+            print_precheck_result_fail
             exit 1
         fi
     done
     if [ ! -x "$ORA_INVENTORY/orainstRoot.sh" ]; then
-        echo "FAIL: Required Oracle Inventory root script is missing or not executable: $ORA_INVENTORY/orainstRoot.sh"
-        echo "PRECHECK RESULT: FAIL"
+        print_fail "Required Oracle Inventory root script is missing or not executable: $ORA_INVENTORY/orainstRoot.sh"
+        print_precheck_result_fail
         exit 1
     fi
     if [ ! -r "$ORACLE_HOME/assistants/dbca/dbca.rsp" ] ||
        [ ! -d "$ORACLE_HOME/dbs" ] || [ ! -r "$ORACLE_HOME/dbs" ] ||
        [ ! -f /etc/oratab ] || [ ! -r /etc/oratab ]; then
-        echo "FAIL: Required database creation assets are missing or unreadable."
-        echo "PRECHECK RESULT: FAIL"
+        print_fail "Required database creation assets are missing or unreadable."
+        print_precheck_result_fail
         exit 1
     fi
     if [ "$ALLOW_COMPLETE_SOFTWARE" -ne 1 ]; then
-        echo "FAIL: Oracle Software is already installed: $ORACLE_HOME"
-        echo "Use --create-db to create a new database with this verified Oracle Home."
-        echo "PRECHECK RESULT: FAIL"
+        print_fail "Oracle Software is already installed: $ORACLE_HOME"
+        echo "This command without options is for a new Oracle Software installation."
+        echo ""
+        echo "To check a new SID and Listener target with this verified Oracle Home:"
+        echo "  $0 --target-only --allow-complete-software --sid ORCL --listener-port 1521"
+        echo ""
+        echo "To create a new database through Main:"
+        echo "  $SCRIPT_DIR/oracle_linux_8_19c_full_install.sh --create-db"
+        echo ""
+        echo "To verify an existing project-managed database:"
+        echo "  $SCRIPT_DIR/oracle_linux_8_19c_postcheck.sh --sid ORCL --listener-port 1521"
+        echo ""
+        echo "For all PreCheck options:"
+        echo "  $0 --help"
+        print_precheck_result_fail
         exit 1
     fi
 fi
@@ -329,8 +379,8 @@ if [ "$TARGET_ONLY" -eq 1 ]; then
        [ -z "${DATA_DIR:-}" ] || [ -z "${FRA_DIR:-}" ] ||
        [ -z "${TOTAL_MEMORY_MB:-}" ] || [ -z "${FRA_SIZE_MB:-}" ] ||
        [ -z "${CHARACTER_SET:-}" ] || [ -z "${NATIONAL_CHARACTER_SET:-}" ]; then
-        echo "FAIL: Database target settings are missing from: $CONFIG_FILE"
-        echo "PRECHECK RESULT: FAIL"
+        print_fail "Database target settings are missing from: $CONFIG_FILE"
+        print_precheck_result_fail
         exit 1
     fi
 elif [ "$SOFTWARE_STATE" = "COMPLETE" ]; then
@@ -340,8 +390,8 @@ elif [ "$SOFTWARE_STATE" = "COMPLETE" ]; then
        [ -z "${ORACLE_BASE:-}" ] || [ -z "${ORACLE_OWNER:-}" ] ||
        [ -z "${ORACLE_GROUP:-}" ] || [ -z "${DATA_DIR:-}" ] ||
        [ -z "${FRA_DIR:-}" ]; then
-        echo "FAIL: Database-only settings are missing from: $CONFIG_FILE"
-        echo "PRECHECK RESULT: FAIL"
+        print_fail "Database-only settings are missing from: $CONFIG_FILE"
+        print_precheck_result_fail
         exit 1
     fi
 else
@@ -352,8 +402,8 @@ else
        [ -z "${ORACLE_BASE:-}" ] || [ -z "${ORACLE_OWNER:-}" ] ||
        [ -z "${ORACLE_GROUP:-}" ] || [ -z "${LOCAL_BIN_DIR:-}" ] ||
        [ -z "${DATA_DIR:-}" ]; then
-        echo "FAIL: Required settings are missing from: $CONFIG_FILE"
-        echo "PRECHECK RESULT: FAIL"
+        print_fail "Required settings are missing from: $CONFIG_FILE"
+        print_precheck_result_fail
         exit 1
     fi
 fi
@@ -362,8 +412,8 @@ DB_HOST="$(hostname -f 2>/dev/null)"
 
 if [ "$CREATE_DB" -eq 1 ] &&
    { [ -z "$ORACLE_SID" ] || [ -z "$LISTENER_PORT" ]; }; then
-    echo "FAIL: Database target checks require --sid and --listener-port."
-    echo "PRECHECK RESULT: FAIL"
+    print_fail "Database target checks require --sid and --listener-port."
+    print_precheck_result_fail
     exit 1
 fi
 
@@ -455,7 +505,7 @@ else
 
     if [ -z "$MINIMUM_KERNEL" ]; then
         record_warn "Kernel family is not recognized for Oracle Linux ${OS_MAJOR:-unknown}: $KERNEL_RELEASE"
-        echo "WARN: Verify this kernel and Oracle Database 19c combination in Oracle Certification."
+        print_warn "Verify this kernel and Oracle Database 19c combination in Oracle Certification."
     elif ! command -v sort >/dev/null 2>&1; then
         record_fail "Required command is missing for kernel comparison: sort"
     elif printf '%s\n%s\n' "$MINIMUM_KERNEL" "$KERNEL_RELEASE" | LC_ALL=C sort -V -C; then
@@ -463,7 +513,7 @@ else
         echo "INFO: This checks the kernel minimum only; full certification is not verified."
         if [ -n "$KERNEL_RU_NOTE" ]; then
             record_warn "$KERNEL_RU_NOTE"
-            echo "WARN: Continuing for 19.3 Base Media testing only; this is not a certified production combination."
+            print_warn "Continuing for 19.3 Base Media testing only; this is not a certified production combination."
         fi
     else
         record_warn "Running kernel is below the documented minimum for $KERNEL_FAMILY: $KERNEL_RELEASE"
@@ -953,12 +1003,12 @@ echo "========================================"
 echo " Precheck Summary"
 echo "========================================"
 echo "PASS: $PASS_COUNT"
-echo "WARN: $WARN_COUNT"
-echo "FAIL: $FAIL_COUNT"
+print_warn "$WARN_COUNT"
+print_fail "$FAIL_COUNT"
 
 # Warnings describe work that Main can perform. Any failure is a hard gate.
 if [ "$FAIL_COUNT" -gt 0 ]; then
-    echo "PRECHECK RESULT: FAIL"
+    print_precheck_result_fail
     echo "No installation changes were made by this script."
     exit 1
 fi

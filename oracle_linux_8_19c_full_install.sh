@@ -163,7 +163,7 @@ cleanup_install() {
         wait "$DB_WORKER_PID" 2>/dev/null || true
     fi
     if [ -n "$DB_SECRET_DIR" ]; then
-        rm -f -- "$DB_SECRET_DIR/dbca.rsp" "$DB_SECRET_DIR/connect.sql"
+        rm -f -- "$DB_SECRET_DIR/dbca.rsp"
         rmdir -- "$DB_SECRET_DIR"
     fi
     unset ORACLE_PASSWORD DB_PASSWORD PASSWORD_CONFIRM DB_PASSWORD_RSP
@@ -1064,17 +1064,12 @@ if [ "$CREATE_DB" -eq 1 ]; then
         echo "ERROR: Cannot prepare the DBCA response file."
         exit 1
     fi
-    if ! printf 'SET ECHO OFF VERIFY OFF DEFINE OFF\nWHENEVER OSERROR EXIT FAILURE\nWHENEVER SQLERROR EXIT FAILURE\nCONNECT system/"%s"@//%s:%s/%s\n' \
-        "$DB_PASSWORD" "$DB_HOST" "$LISTENER_PORT" "$DB_SERVICE" > "$DB_SECRET_DIR/connect.sql"; then
-        echo "ERROR: Cannot prepare the SQL*Plus login file."
-        exit 1
-    fi
-    if ! chmod 600 "$DB_SECRET_DIR/dbca.rsp" "$DB_SECRET_DIR/connect.sql" ||
-       ! chown "$ORACLE_OWNER:$ORACLE_GROUP" "$DB_SECRET_DIR" "$DB_SECRET_DIR/dbca.rsp" "$DB_SECRET_DIR/connect.sql"; then
+    if ! chmod 600 "$DB_SECRET_DIR/dbca.rsp" ||
+       ! chown "$ORACLE_OWNER:$ORACLE_GROUP" "$DB_SECRET_DIR" "$DB_SECRET_DIR/dbca.rsp"; then
         echo "ERROR: Cannot protect database credential files."
         exit 1
     fi
-    unset DB_PASSWORD DB_PASSWORD_RSP
+    unset DB_PASSWORD_RSP
     # Run Listener and DBCA work in a clean oracle-owned shell. Only non-secret
     # settings and the private credential directory path are command arguments.
     runuser -u "$ORACLE_OWNER" -- bash --noprofile --norc -s -- \
@@ -1416,33 +1411,31 @@ ORACLE_DATABASE_SCRIPT
         exit "$DB_RESULT"
     fi
 
-    # PostCheck is a separate read-only gate. Credential files are retained
-    # until Easy Connect verification finishes, then removed immediately.
+    if ! rm -f -- "$DB_SECRET_DIR/dbca.rsp" ||
+       ! rmdir -- "$DB_SECRET_DIR"; then
+        echo "ERROR: Could not remove DBCA credential files."
+        exit 1
+    fi
+    DB_SECRET_DIR=""
+
+    # PostCheck is a standalone read-only gate. It receives the password through
+    # standard input and manages its own protected credential file.
     CURRENT_STAGE="post-install health check"
     POSTCHECK_SCRIPT="$SCRIPT_DIR/oracle_linux_8_19c_postcheck.sh"
     if [ -L "$POSTCHECK_SCRIPT" ] || [ ! -f "$POSTCHECK_SCRIPT" ]; then
         echo "ERROR: PostCheck must be a regular file: $POSTCHECK_SCRIPT"
         exit 1
     fi
-    if ! runuser -u "$ORACLE_OWNER" -- env \
-        ORACLE_BASE="$ORACLE_BASE" \
-        ORACLE_HOME="$ORACLE_HOME" \
-        ORACLE_SID="$ORACLE_SID" \
-        TNS_ADMIN="$ORACLE_HOME/network/admin" \
-        LD_LIBRARY_PATH="$ORACLE_HOME/lib" \
-        bash -s -- \
-        "$ORACLE_SID" "$LISTENER_PORT" \
-        "$DB_HOST" "$DB_SERVICE" "$DB_SECRET_DIR" \
-        < "$POSTCHECK_SCRIPT"; then
+    if ! printf '%s\n' "$DB_PASSWORD" | bash "$POSTCHECK_SCRIPT" \
+        --sid "$ORACLE_SID" \
+        --listener-port "$LISTENER_PORT" \
+        --db-host "$DB_HOST" \
+        --db-service "$DB_SERVICE" \
+        --password-stdin; then
         echo "ERROR: Oracle Database PostCheck failed."
         exit 1
     fi
-    if ! rm -f -- "$DB_SECRET_DIR/dbca.rsp" "$DB_SECRET_DIR/connect.sql" ||
-       ! rmdir -- "$DB_SECRET_DIR"; then
-        echo "ERROR: Could not remove database credential files."
-        exit 1
-    fi
-    DB_SECRET_DIR=""
+    unset DB_PASSWORD
     echo "Database, profile, and PostCheck completed successfully."
 fi
 CURRENT_STAGE="completed"

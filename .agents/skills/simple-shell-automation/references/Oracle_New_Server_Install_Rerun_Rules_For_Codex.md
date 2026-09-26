@@ -542,6 +542,8 @@ $ORA_INVENTORY/ContentsXML/inventory.xml
 
 第二階段是 read-only prerequisite 與 target 檢查。Software hard gate 通過後，可以完成其餘檢查並累計 `PASS_COUNT`、`WARN_COUNT` 與 `FAIL_COUNT`，不需要因單一 target failure 立即退出。
 
+PreCheck 的 WARN、FAIL、結果摘要與最終結果顯示方式，必須遵守 `AGENTS.md` 的終端輸出顯示規則；顏色不得影響 exit code 或停止邏輯。
+
 Target PreCheck 必須涵蓋：
 
 ```text
