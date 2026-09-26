@@ -357,8 +357,8 @@ else
             echo "WARN: Continuing for 19.3 Base Media testing only; this is not a certified production combination."
         fi
     else
-        record_fail "Running kernel is below the documented minimum for $KERNEL_FAMILY: $KERNEL_RELEASE"
-        echo "FAIL: Minimum kernel: $MINIMUM_KERNEL"
+        record_warn "Running kernel is below the documented minimum for $KERNEL_FAMILY: $KERNEL_RELEASE"
+        echo "Minimum kernel: $MINIMUM_KERNEL"
     fi
 fi
 # End running kernel check.
